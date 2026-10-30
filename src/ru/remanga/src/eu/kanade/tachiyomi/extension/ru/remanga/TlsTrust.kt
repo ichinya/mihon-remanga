@@ -32,7 +32,12 @@ internal fun OkHttpClient.Builder.addGlobalSignR46TrustAnchor(): OkHttpClient.Bu
             .joinToString("") { "%02x".format(it) }
         check(digest == R46_SHA256) { "unexpected fingerprint: $digest" }
         cert
-    }.getOrNull() ?: return this
+    }.getOrNull()
+
+    if (anchor == null) {
+        Diagnostics.info("tls-anchor: install SKIPPED (resource/fingerprint failed)")
+        return this
+    }
 
     val systemTmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
         .apply { init(null as KeyStore?) }
@@ -59,8 +64,11 @@ internal fun OkHttpClient.Builder.addGlobalSignR46TrustAnchor(): OkHttpClient.Bu
         override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
             try {
                 systemTm.checkServerTrusted(chain, authType)
+                Diagnostics.info("tls-anchor: system TM OK")
             } catch (e: CertificateException) {
+                Diagnostics.info("tls-anchor: system TM failed -> fallback (${e.message?.take(60)})")
                 fallbackTm.checkServerTrusted(chain, authType)
+                Diagnostics.info("tls-anchor: fallback R46 TM OK")
             }
         }
 
@@ -72,5 +80,6 @@ internal fun OkHttpClient.Builder.addGlobalSignR46TrustAnchor(): OkHttpClient.Bu
     // null trust managers would validate against the system store only and reject the chain
     // before OkHttp ever consults compositeTm.
     val sslContext = SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(compositeTm), null) }
+    Diagnostics.info("tls-anchor: installed, sslSocketFactory replaced")
     return sslSocketFactory(sslContext.socketFactory, compositeTm)
 }

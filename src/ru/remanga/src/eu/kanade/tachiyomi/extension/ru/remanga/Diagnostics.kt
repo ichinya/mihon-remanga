@@ -45,6 +45,13 @@ internal object Diagnostics {
 
     fun logPath(): String = logFile.absolutePath
 
+    /** Appends a plain diagnostic line; no toast, no prefs. */
+    fun info(message: String) {
+        synchronized(lock) {
+            runCatching { appendToLogFile(message) }
+        }
+    }
+
     fun failure(request: Request, code: Int? = null, error: Throwable? = null, note: String? = null) {
         val dns = runCatching {
             InetAddress.getAllByName(request.url.host).joinToString { it.hostAddress ?: "?" }
@@ -83,14 +90,10 @@ internal object Diagnostics {
         }
     }
 
-    // Extensions run inside the host app's process, so the app's PackageInfo is Mihon's, not
-    // ours; recover the extension's own version from the APK path on this classloader.
-    private fun selfVersion(): String = runCatching {
-        val apkPath = Diagnostics::class.java.protectionDomain?.codeSource?.location?.toURI()?.path
-        apkPath?.let {
-            applicationContext.packageManager.getPackageArchiveInfo(it, 0)?.versionName
-        }
-    }.getOrNull()?.let { "remanga-v$it" } ?: "remanga-v?"
+    // The host app's PackageInfo is Mihon's, not ours; read the version baked at build time.
+    private fun selfVersion(): String = "remanga-v" + runCatching {
+        eu.kanade.tachiyomi.extension.BuildConfig.EXT_VERSION
+    }.getOrDefault("?")
 
     private fun isTlsFailure(error: Throwable?): Boolean {
         var cause: Throwable? = error

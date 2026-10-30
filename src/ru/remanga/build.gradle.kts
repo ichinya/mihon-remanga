@@ -24,3 +24,10 @@ keiyoushi {
         path("/manga/..*")
     }
 }
+
+android {
+    defaultConfig {
+        // "1.6." + 117 folds to "1.6.117" at compile time; follows the CI-bumped versionCode.
+        buildConfigField("String", "EXT_VERSION", "\"1.6.\" + ${keiyoushi.versionCode.get()}")
+    }
+}
