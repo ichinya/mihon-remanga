@@ -78,8 +78,8 @@ jobs:
             git worktree add --orphan publish
           fi
           cd publish
-          rm -f apk/*.apk
           mkdir -p apk icon
+          # keep old APKs: cached repo indexes on devices may still point at them
           cp "../$apk" "apk/$(basename "$apk")"
           cp ../src/ru/remanga/res/mipmap-xxxhdpi/ic_launcher.png \
             "icon/eu.kanade.tachiyomi.extension.ru.remanga.png"
