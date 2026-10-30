@@ -9,6 +9,7 @@ import java.security.cert.CertificateException
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 
@@ -66,6 +67,10 @@ internal fun OkHttpClient.Builder.addGlobalSignR46TrustAnchor(): OkHttpClient.Bu
         override fun getAcceptedIssuers(): Array<X509Certificate> = systemTm.acceptedIssuers + fallbackTm.acceptedIssuers
     }
 
-    val sslContext = SSLContext.getInstance("TLS").apply { init(null, null, null) }
+    // The SSLContext must be initialized WITH the composite trust manager: the JSSE socket
+    // performs the actual trust validation during startHandshake(), so a context created with
+    // null trust managers would validate against the system store only and reject the chain
+    // before OkHttp ever consults compositeTm.
+    val sslContext = SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(compositeTm), null) }
     return sslSocketFactory(sslContext.socketFactory, compositeTm)
 }
