@@ -9,6 +9,7 @@ import okhttp3.Request
 import okhttp3.Response
 import java.io.File
 import java.io.IOException
+import java.net.InetAddress
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
@@ -36,12 +37,17 @@ internal object Diagnostics {
     fun logPath(): String = logFile.absolutePath
 
     fun failure(request: Request, code: Int? = null, error: Throwable? = null, note: String? = null) {
+        val dns = runCatching {
+            InetAddress.getAllByName(request.url.host).joinToString { it.hostAddress ?: "?" }
+        }.getOrNull()
+
         val block = buildString {
             append(LocalDateTime.now().format(timestampFormat))
             append(" · ")
             append(request.method)
             append(' ')
             append(request.url)
+            if (dns != null) append("\n  DNS: ").append(dns)
             if (code != null) append(" · HTTP ").append(code)
             var cause: Throwable? = error
             while (cause != null) {
