@@ -3,7 +3,7 @@ package eu.kanade.tachiyomi.extension.ru.remanga
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
-import androidx.preference.ListPreference
+import androidx.preference.Preference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -59,38 +59,55 @@ abstract class ReManga :
             setDefaultValue(true)
         }.also(screen::addPreference)
 
-        ListPreference(screen.context).apply {
-            title = "Последняя ошибка"
-            summary = Diagnostics.lastSummary() ?: "ошибок не зафиксировано"
-            entries = emptyArray()
-            entryValues = emptyArray()
-            setOnPreferenceClickListener { true }
-        }.also(screen::addPreference)
-
-        ListPreference(screen.context).apply {
-            title = "Лог диагностики — поделиться"
-            summary = "Файл: ${Diagnostics.logPath()}"
-            entries = emptyArray()
-            entryValues = emptyArray()
-            setOnPreferenceClickListener {
-                shareLog(screen.context)
-                true
-            }
-        }.also(screen::addPreference)
-
-        ListPreference(screen.context).apply {
-            title = "Очистить лог диагностики"
-            entries = emptyArray()
-            entryValues = emptyArray()
-            setOnPreferenceClickListener {
-                Diagnostics.clear()
-                Toast.makeText(screen.context, "Лог очищен", Toast.LENGTH_SHORT).show()
-                true
-            }
-        }.also(screen::addPreference)
+        addDiagnosticsPreferences(screen)
     }
 
-    private fun shareLog(context: Context): Boolean {
+    // The keiyoushi stubs only expose DialogPreference subclasses with a Context ctor, and tapping
+    // any of them opens its dialog (crashing if the row has no key). Plain Preference — no dialog,
+    // pure click handling — is only present in the app at runtime, so build it reflectively.
+    private fun addDiagnosticsPreferences(screen: PreferenceScreen) {
+        val context = screen.context
+
+        fun actionPreference(key: String, title: String, summary: String, action: () -> Unit) {
+            val preference = runCatching {
+                Preference::class.java.getConstructor(Context::class.java).newInstance(context) as Preference
+            }.getOrNull() ?: return
+            preference.apply {
+                this.key = key
+                this.title = title
+                this.summary = summary
+                setOnPreferenceClickListener {
+                    action()
+                    true
+                }
+            }
+            screen.addPreference(preference)
+        }
+
+        actionPreference(
+            key = "diagnostics_last_error",
+            title = "Последняя ошибка",
+            summary = Diagnostics.lastSummary() ?: "ошибок не зафиксировано",
+            action = {},
+        )
+        actionPreference(
+            key = "diagnostics_share_log",
+            title = "Лог диагностики — поделиться",
+            summary = "Файл: ${Diagnostics.logPath()}",
+            action = { shareLog(context) },
+        )
+        actionPreference(
+            key = "diagnostics_clear_log",
+            title = "Очистить лог диагностики",
+            summary = "Удаляет все сохранённые записи",
+            action = {
+                Diagnostics.clear()
+                Toast.makeText(context, "Лог очищен", Toast.LENGTH_SHORT).show()
+            },
+        )
+    }
+
+    private fun shareLog(context: Context) {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_SUBJECT, "Remanga diagnostics log")
@@ -100,7 +117,6 @@ abstract class ReManga :
         runCatching {
             context.startActivity(Intent.createChooser(intent, "Лог диагностики Remanga"))
         }
-        return true
     }
 
     override suspend fun getPopularManga(page: Int): MangasPage = fetchCatalogList(page) {
