@@ -10,8 +10,17 @@ import okhttp3.Response
 import java.io.File
 import java.io.IOException
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.security.SecureRandom
+import java.security.cert.CertPathValidatorException
+import java.security.cert.X509Certificate
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 
 /**
  * Persists the last network failures so problems (TLS interception, DNS hijacks,
@@ -41,6 +50,8 @@ internal object Diagnostics {
             InetAddress.getAllByName(request.url.host).joinToString { it.hostAddress ?: "?" }
         }.getOrNull()
 
+        val peerCerts = if (isTlsFailure(error)) probePeerCertificates(request.url.host) else null
+
         val block = buildString {
             append(LocalDateTime.now().format(timestampFormat))
             append(" · ")
@@ -48,6 +59,7 @@ internal object Diagnostics {
             append(' ')
             append(request.url)
             if (dns != null) append("\n  DNS: ").append(dns)
+            if (peerCerts != null) append("\n  PEER CERTS (предъявлено устройству):\n  ").append(peerCerts)
             if (code != null) append(" · HTTP ").append(code)
             var cause: Throwable? = error
             while (cause != null) {
@@ -68,6 +80,47 @@ internal object Diagnostics {
             showToast()
         }
     }
+
+    private fun isTlsFailure(error: Throwable?): Boolean {
+        var cause: Throwable? = error
+        while (cause != null) {
+            if (cause is SSLHandshakeException || cause is CertPathValidatorException) return true
+            cause = cause.cause
+        }
+        return false
+    }
+
+    /**
+     * One-shot diagnostic probe: completes the TLS handshake with validation disabled and records
+     * the certificate chain the peer actually presents. Never used for real source traffic.
+     */
+    private fun probePeerCertificates(host: String): String? = runCatching {
+        val trustAll = object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<X509Certificate>?, authType: String?) = Unit
+            override fun checkServerTrusted(chain: Array<X509Certificate>?, authType: String?) = Unit
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+        }
+        val context = SSLContext.getInstance("TLS")
+        context.init(null, arrayOf<TrustManager>(trustAll), SecureRandom())
+        val socket = context.socketFactory.createSocket() as SSLSocket
+        try {
+            socket.soTimeout = 10_000
+            socket.connect(InetSocketAddress(host, 443), 10_000)
+            socket.startHandshake()
+            socket.session.peerCertificates
+                .filterIsInstance<X509Certificate>()
+                .joinToString("\n  ") { cert ->
+                    "subject=\"${cert.subjectX500Principal.name}\"" +
+                        " issuer=\"${cert.issuerX500Principal.name}\"" +
+                        " notAfter=${cert.notAfter}" +
+                        " dnsNames=${cert.subjectAlternativeNames
+                            ?.mapNotNull { if (it[0] == 2) it[1] else null }
+                            ?.joinToString()}"
+                }
+        } finally {
+            runCatching { socket.close() }
+        }
+    }.getOrNull()
 
     private fun appendToLogFile(block: String) {
         val file = logFile
