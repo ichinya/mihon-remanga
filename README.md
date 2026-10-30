@@ -41,6 +41,11 @@ https://raw.githubusercontent.com/ichinya/mihon-remanga/repo/index.min.json
 - `src/ru/remanga/` — сам источник (KeiSource, libVersion 1.6):
   каталог, поиск с фильтрами (сортировка/тип/возраст), детали, главы всех веток
   переводчиков, страницы; платные главы помечаются 🔒; зеркало для картинок CDN.
+- **Диагностика ошибок**: сетевые сбои (TLS, DNS, HTTP ≥400, HTML-страница
+  DDoS-Guard вместо API) сохраняются в лог на устройстве
+  (`Android/data/<приложение>/files/remanga-diagnostics.log`), при ошибке
+  показывается тост «ошибка сохранена в лог». В настройках источника — раздел
+  «Диагностика»: последняя ошибка, шеринг лога, очистка.
 - `core/`, `compiler/`, `gradle/`, `common/` — сборочная система keiyoushi
   (Apache-2.0), база — форк [avustr-code/extensions-source](https://github.com/avustr-code/extensions-source)
   от [keiyoushi/extensions-source](https://github.com/keiyoushi/extensions-source).

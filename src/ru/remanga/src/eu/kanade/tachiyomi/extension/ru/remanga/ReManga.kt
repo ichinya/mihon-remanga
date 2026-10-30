@@ -1,5 +1,9 @@
 package eu.kanade.tachiyomi.extension.ru.remanga
 
+import android.content.Context
+import android.content.Intent
+import android.widget.Toast
+import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -37,6 +41,7 @@ abstract class ReManga :
     private val showFreeDate get() = preferences.getBoolean(SHOW_FREE_DATE_PREF, true)
 
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(3, 1.seconds)
+        .addInterceptor(DiagnosticsInterceptor)
         .addInterceptor(ImageCdnFallbackInterceptor)
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
@@ -53,6 +58,49 @@ abstract class ReManga :
             summary = "Show the date when locked chapters become free to read"
             setDefaultValue(true)
         }.also(screen::addPreference)
+
+        ListPreference(screen.context).apply {
+            title = "Последняя ошибка"
+            summary = Diagnostics.lastSummary() ?: "ошибок не зафиксировано"
+            entries = emptyArray()
+            entryValues = emptyArray()
+            setOnPreferenceClickListener { true }
+        }.also(screen::addPreference)
+
+        ListPreference(screen.context).apply {
+            title = "Лог диагностики — поделиться"
+            summary = "Файл: ${Diagnostics.logPath()}"
+            entries = emptyArray()
+            entryValues = emptyArray()
+            setOnPreferenceClickListener {
+                shareLog(screen.context)
+                true
+            }
+        }.also(screen::addPreference)
+
+        ListPreference(screen.context).apply {
+            title = "Очистить лог диагностики"
+            entries = emptyArray()
+            entryValues = emptyArray()
+            setOnPreferenceClickListener {
+                Diagnostics.clear()
+                Toast.makeText(screen.context, "Лог очищен", Toast.LENGTH_SHORT).show()
+                true
+            }
+        }.also(screen::addPreference)
+    }
+
+    private fun shareLog(context: Context): Boolean {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Remanga diagnostics log")
+            putExtra(Intent.EXTRA_TEXT, Diagnostics.readLog())
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching {
+            context.startActivity(Intent.createChooser(intent, "Лог диагностики Remanga"))
+        }
+        return true
     }
 
     override suspend fun getPopularManga(page: Int): MangasPage = fetchCatalogList(page) {
