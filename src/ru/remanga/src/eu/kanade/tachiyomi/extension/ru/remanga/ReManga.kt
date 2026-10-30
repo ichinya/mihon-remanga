@@ -41,6 +41,7 @@ abstract class ReManga :
     private val showFreeDate get() = preferences.getBoolean(SHOW_FREE_DATE_PREF, true)
 
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(3, 1.seconds)
+        .addGlobalSignR46TrustAnchor()
         .addInterceptor(DiagnosticsInterceptor)
         .addInterceptor(ImageCdnFallbackInterceptor)
 
