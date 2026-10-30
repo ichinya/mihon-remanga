@@ -13,6 +13,12 @@
 https://raw.githubusercontent.com/ichinya/mihon-remanga/repo/index.min.json
 ```
 
+Запасная ссылка (GitHub Pages), если raw-адрес не открывается:
+
+```
+https://ichinya.github.io/mihon-remanga/index.min.json
+```
+
 **Вариант 2 — вручную:** скачать APK и открыть его на телефоне.
 
 - Страница релизов: <https://github.com/ichinya/mihon-remanga/releases/latest>

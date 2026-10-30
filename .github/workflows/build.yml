@@ -82,6 +82,8 @@ jobs:
           jq -nc --arg v "$version" --argjson c "$code" --arg a "apk/$(basename "$apk")" \
             '[{name:"Tachiyomi: Remanga",pkg:"eu.kanade.tachiyomi.extension.ru.remanga",apk:$a,lang:"ru",code:$c,version:$v,nsfw:1,sources:[{name:"Remanga",lang:"ru",id:"8983242087533137528",baseUrl:"https://remanga.org"}]}]' \
             > index.min.json
+          # older Mihon versions and forks fetch the pretty index.json instead of the minified one
+          jq . index.min.json > index.json
           git add -A
           git commit -m "Remanga v$version"
           git push origin HEAD:repo
