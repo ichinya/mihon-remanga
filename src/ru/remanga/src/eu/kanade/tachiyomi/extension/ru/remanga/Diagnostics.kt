@@ -53,6 +53,8 @@ internal object Diagnostics {
         val peerCerts = if (isTlsFailure(error)) probePeerCertificates(request.url.host) else null
 
         val block = buildString {
+            append(selfVersion())
+            append(" · ")
             append(LocalDateTime.now().format(timestampFormat))
             append(" · ")
             append(request.method)
@@ -80,6 +82,15 @@ internal object Diagnostics {
             showToast()
         }
     }
+
+    // Extensions run inside the host app's process, so the app's PackageInfo is Mihon's, not
+    // ours; recover the extension's own version from the APK path on this classloader.
+    private fun selfVersion(): String = runCatching {
+        val apkPath = Diagnostics::class.java.protectionDomain?.codeSource?.location?.toURI()?.path
+        apkPath?.let {
+            applicationContext.packageManager.getPackageArchiveInfo(it, 0)?.versionName
+        }
+    }.getOrNull()?.let { "remanga-v$it" } ?: "remanga-v?"
 
     private fun isTlsFailure(error: Throwable?): Boolean {
         var cause: Throwable? = error
