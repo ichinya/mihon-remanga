@@ -83,7 +83,9 @@ jobs:
           cp "../$apk" "apk/$(basename "$apk")"
           cp ../src/ru/remanga/res/mipmap-xxxhdpi/ic_launcher.png \
             "icon/eu.kanade.tachiyomi.extension.ru.remanga.png"
-          jq -nc --arg v "$version" --argjson c "$code" --arg a "apk/$(basename "$apk")" \
+          # Mihon's legacy path builds apkUrl as "$base/apk/$apk" — the field must hold the bare
+          # filename, not a path with the apk/ prefix (prefixed name 404s the download).
+          jq -nc --arg v "$version" --argjson c "$code" --arg a "$(basename "$apk")" \
             '[{name:"Tachiyomi: Remanga",pkg:"eu.kanade.tachiyomi.extension.ru.remanga",apk:$a,lang:"ru",code:$c,version:$v,nsfw:1,sources:[{name:"Remanga",lang:"ru",id:"8983242087533137528",baseUrl:"https://remanga.org"}]}]' \
             > index.min.json
           # older Mihon versions and forks fetch the pretty index.json instead of the minified one
