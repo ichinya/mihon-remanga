@@ -37,6 +37,10 @@ jobs:
           echo "versionCode=$N" >> "$GITHUB_ENV"
 
       - name: Build release APK
+        env:
+          KEY_STORE_PASSWORD: remanga-debug
+          ALIAS: remanga
+          KEY_PASSWORD: remanga-debug
         run: ./gradlew :src:ru:remanga:assembleRelease
 
       - name: Collect artifacts
@@ -84,6 +88,10 @@ jobs:
             > index.min.json
           # older Mihon versions and forks fetch the pretty index.json instead of the minified one
           jq . index.min.json > index.json
+          # Mihon's ExtensionStoreService requires repo.json for legacy-array repos (index_v2 null = stay legacy)
+          jq -nc --arg fp "707c7a401975a24137992e1811cbde44d378f5719628e840d1a41e06932888ff" \
+            '{index_v2:null,meta:{name:"Remanga",shortName:"Remanga",website:"https://remanga.org",signingKeyFingerprint:$fp}}' \
+            > repo.json
           git add -A
           git commit -m "Remanga v$version"
           git push origin HEAD:repo
