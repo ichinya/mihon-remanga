@@ -1,0 +1,87 @@
+name: Build and publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compute auto version
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          BASE=$(grep -oE 'versionCode = [0-9]+' src/ru/remanga/build.gradle.kts | grep -oE '[0-9]+')
+          N=$((BASE + RUN_NUMBER))
+          sed -i "s/versionCode = [0-9]*/versionCode = $N/" src/ru/remanga/build.gradle.kts
+          echo "versionCode=$N" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        run: ./gradlew :src:ru:remanga:assembleRelease
+
+      - name: Collect artifacts
+        run: |
+          INFO=src/ru/remanga/build/keiyoushi-source-info.json
+          VERSION=$(jq -r .versionName "$INFO")
+          CODE=$(jq -r .versionCode "$INFO")
+          APK=$(find src/ru/remanga/build/outputs/apk -name "tachiyomi-ru.remanga-v$VERSION.apk")
+          cp "$APK" Remanga.apk
+          {
+            echo "version=$VERSION"
+            echo "code=$CODE"
+            echo "apk=$APK"
+          } >> "$GITHUB_ENV"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$version" \
+            --title "Remanga v$version" \
+            --notes "Автосборка: versionName $version, versionCode $code" \
+            "$apk" "Remanga.apk"
+
+      - name: Publish repo branch (Mihon extension repo)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin repo >/dev/null 2>&1; then
+            git fetch origin repo --depth 1
+            git worktree add publish FETCH_HEAD
+          else
+            git worktree add --orphan publish
+          fi
+          cd publish
+          rm -f apk/*.apk
+          mkdir -p apk icon
+          cp "../$apk" "apk/$(basename "$apk")"
+          cp ../src/ru/remanga/res/mipmap-xxxhdpi/ic_launcher.png \
+            "icon/eu.kanade.tachiyomi.extension.ru.remanga.png"
+          jq -nc --arg v "$version" --argjson c "$code" --arg a "apk/$(basename "$apk")" \
+            '[{name:"Tachiyomi: Remanga",pkg:"eu.kanade.tachiyomi.extension.ru.remanga",apk:$a,lang:"ru",code:$c,version:$v,nsfw:1,sources:[{name:"Remanga",lang:"ru",id:"8983242087533137528",baseUrl:"https://remanga.org"}]}]' \
+            > index.min.json
+          git add -A
+          git commit -m "Remanga v$version"
+          git push origin HEAD:repo
