@@ -84,7 +84,7 @@ abstract class ReManga :
 
         EditTextPreference(screen.context).apply {
             key = EX_DOMAIN_PREF
-            title = "Домен ExManga"
+            title = "API-домен ExManga"
             summary = "По умолчанию $DEFAULT_EX_DOMAIN"
             setDefaultValue(DEFAULT_EX_DOMAIN)
         }.also(screen::addPreference)
@@ -227,7 +227,8 @@ abstract class ReManga :
             .filter { it.height > 10 }
             .mapIndexed { index, page ->
                 val link = if (page.link.startsWith("http")) page.link else "$exMangaDomain/${page.link.trimStart('/')}"
-                Page(index, imageUrl = link)
+                // "#ex" marks ExManga images for imageRequest(); fragments are never sent to servers.
+                Page(index, imageUrl = "$link#ex")
             }
     }
 
@@ -247,7 +248,7 @@ abstract class ReManga :
         val exDomain = if (useExManga && title.id != 0L) exMangaDomain else null
         val exChapters = if (exDomain != null) {
             runCatching {
-                val response = client.get("$exDomain/chapter/history/${title.id}", exHeaders(), ensureSuccess = false)
+                val response = client.get("$exDomain/manga/history?id=${title.id}", exHeaders(), ensureSuccess = false)
                 response.use { response ->
                     if (response.isSuccessful) {
                         response.parseAs<ExWrapperDto<List<ExChapterDto>>>().data
@@ -309,13 +310,15 @@ abstract class ReManga :
         const val SHOW_FREE_DATE_PREF = "show_free_publication_date"
         const val EX_PAID_PREF = "read_paid_via_exmanga"
         const val EX_DOMAIN_PREF = "exmanga_domain"
-        const val DEFAULT_EX_DOMAIN = "https://exmanga.ru"
+        const val DEFAULT_EX_DOMAIN = "https://api.exmanga.org"
     }
 
     override fun imageRequest(page: Page): Request {
         val imageUrl = page.imageUrl ?: return super.imageRequest(page)
-        if (imageUrl.contains("exmanga")) {
-            return Request.Builder().url(imageUrl).headers(exHeaders()).build()
+        if (imageUrl.endsWith("#ex")) {
+            // ExManga pages: the magic plain UA is what their server expects.
+            val url = imageUrl.removeSuffix("#ex")
+            return Request.Builder().url(url).headers(exHeaders()).build()
         }
         return super.imageRequest(page)
     }
