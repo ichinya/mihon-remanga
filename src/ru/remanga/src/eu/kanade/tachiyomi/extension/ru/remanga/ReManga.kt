@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.extension.ru.remanga
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
+import androidx.preference.EditTextPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
@@ -26,6 +27,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.Response
 import kotlin.time.Duration.Companion.seconds
 
@@ -39,6 +41,19 @@ abstract class ReManga :
     private val showLocked get() = preferences.getBoolean(SHOW_LOCKED_PREF, true)
 
     private val showFreeDate get() = preferences.getBoolean(SHOW_FREE_DATE_PREF, true)
+
+    private val useExManga get() = preferences.getBoolean(EX_PAID_PREF, true)
+
+    private val exMangaDomain: String
+        get() = preferences.getString(EX_DOMAIN_PREF, DEFAULT_EX_DOMAIN)?.trim()?.trimEnd('/')
+            ?: DEFAULT_EX_DOMAIN
+
+    // The magic plain UA is what exmanga.ru expects; the app's browser UA gets rejected.
+    private fun exHeaders() = okhttp3.Headers.Builder()
+        .set("User-Agent", "Tachiyomi")
+        .set("Accept", "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+        .set("Referer", "$baseUrl/")
+        .build()
 
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(3, 1.seconds)
         .addGlobalSignR46TrustAnchor()
@@ -58,6 +73,20 @@ abstract class ReManga :
             title = "Show free publication date"
             summary = "Show the date when locked chapters become free to read"
             setDefaultValue(true)
+        }.also(screen::addPreference)
+
+        SwitchPreferenceCompat(screen.context).apply {
+            key = EX_PAID_PREF
+            title = "Читать платные главы через ExManga"
+            summary = "Платные главы, имеющиеся на сестринском сайте ExManga, открываются оттуда"
+            setDefaultValue(true)
+        }.also(screen::addPreference)
+
+        EditTextPreference(screen.context).apply {
+            key = EX_DOMAIN_PREF
+            title = "Домен ExManga"
+            summary = "По умолчанию $DEFAULT_EX_DOMAIN"
+            setDefaultValue(DEFAULT_EX_DOMAIN)
         }.also(screen::addPreference)
 
         addDiagnosticsPreferences(screen)
@@ -168,6 +197,7 @@ abstract class ReManga :
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/manga/${manga.url}"
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
+        if (chapter.scanlator == "exmanga") return fetchExPages(chapter)
         val chapterId = "$baseUrl${chapter.url}".toHttpUrlOrNull()?.queryParameter("chapter")
             ?: return emptyList()
         val response = client.get(chapterApiUrl(chapterId), ensureSuccess = false)
@@ -183,6 +213,24 @@ abstract class ReManga :
             .mapIndexed { index, page -> Page(index, imageUrl = page.link.toAbsoluteUrl()) }
     }
 
+    private suspend fun fetchExPages(chapter: SChapter): List<Page> {
+        val exId = "$exMangaDomain${chapter.url}".toHttpUrlOrNull()?.queryParameter("id")
+            ?: return emptyList()
+        val response = client.get("$exMangaDomain/chapter?id=$exId", exHeaders(), ensureSuccess = false)
+        if (!response.isSuccessful) {
+            response.close()
+            return emptyList()
+        }
+        return response.use { it.parseAs<ExWrapperDto<List<List<ExPageDto>>>>() }
+            .data
+            .flatten()
+            .filter { it.height > 10 }
+            .mapIndexed { index, page ->
+                val link = if (page.link.startsWith("http")) page.link else "$exMangaDomain/${page.link.trimStart('/')}"
+                Page(index, imageUrl = link)
+            }
+    }
+
     private suspend fun fetchCatalogList(page: Int, params: HttpUrl.Builder.() -> Unit): MangasPage {
         val dto = client.get(
             "$API_URL/search/catalog/".toHttpUrl().newBuilder()
@@ -196,6 +244,23 @@ abstract class ReManga :
     }
 
     private suspend fun fetchChapters(title: TitleContentDto, dir: String): List<SChapter> {
+        val exDomain = if (useExManga && title.id != 0L) exMangaDomain else null
+        val exChapters = if (exDomain != null) {
+            runCatching {
+                val response = client.get("$exDomain/chapter/history/${title.id}", exHeaders(), ensureSuccess = false)
+                response.use { response ->
+                    if (response.isSuccessful) {
+                        response.parseAs<ExWrapperDto<List<ExChapterDto>>>().data
+                    } else {
+                        emptyList()
+                    }
+                }
+            }.getOrElse { emptyList() }
+        } else {
+            emptyList()
+        }
+
+        val dateSamples = mutableListOf<String>()
         val chapters = mutableListOf<SChapter>()
         for (branch in title.branches) {
             var page = 1
@@ -204,12 +269,17 @@ abstract class ReManga :
                 if (items.isEmpty()) break
                 chapters += items.mapNotNull { item ->
                     if (item.isLocked && !showLocked) return@mapNotNull null
-                    item.toSChapter(dir, baseUrl, showFreeDate, branch.publisherName())
+                    val chapter = item.toSChapter(dir, baseUrl, showFreeDate, branch.publisherName(), exDomain, exChapters)
+                    if (dateSamples.size < 3 && item.rawUploadDate != null) {
+                        dateSamples += "raw=${item.rawUploadDate} parsed=${chapter.date_upload}"
+                    }
+                    chapter
                 }
                 if (items.size < CHAPTERS_PER_PAGE) break
                 page++
             }
         }
+        if (dateSamples.isNotEmpty()) Diagnostics.info("dates: ${dateSamples.joinToString(" | ")}")
         return chapters
     }
 
@@ -237,6 +307,17 @@ abstract class ReManga :
         const val CHAPTERS_PER_PAGE = 100
         const val SHOW_LOCKED_PREF = "show_locked_chapters"
         const val SHOW_FREE_DATE_PREF = "show_free_publication_date"
+        const val EX_PAID_PREF = "read_paid_via_exmanga"
+        const val EX_DOMAIN_PREF = "exmanga_domain"
+        const val DEFAULT_EX_DOMAIN = "https://exmanga.ru"
+    }
+
+    override fun imageRequest(page: Page): Request {
+        val imageUrl = page.imageUrl ?: return super.imageRequest(page)
+        if (imageUrl.contains("exmanga")) {
+            return Request.Builder().url(imageUrl).headers(exHeaders()).build()
+        }
+        return super.imageRequest(page)
     }
 }
 

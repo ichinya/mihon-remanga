@@ -2,14 +2,14 @@ package eu.kanade.tachiyomi.extension.ru.remanga
 
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import keiyoushi.utils.tryParse
+import keiyoushi.utils.tryParseDateTime
+import keiyoushi.utils.tryParseZonedDateTime
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.Jsoup
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
-import kotlin.time.Instant
 
 @Serializable
 class CatalogDto(
@@ -52,6 +52,7 @@ class TitleDetailDto(
 
 @Serializable
 class TitleContentDto(
+    val id: Long = 0L,
     @SerialName("rus_name") private val rusName: String? = null,
     @SerialName("en_name") private val enName: String? = null,
     @SerialName("main_name") private val mainName: String? = null,
@@ -124,7 +125,24 @@ class ChapterItemDto(
     val isLocked: Boolean
         get() = isPaid && !isBought
 
-    fun toSChapter(dir: String, baseUrl: String, showFreeDate: Boolean, branchPublisher: String?): SChapter = SChapter.create().apply {
+    internal val rawUploadDate: String?
+        get() = uploadDate
+
+    fun toSChapter(
+        dir: String,
+        baseUrl: String,
+        showFreeDate: Boolean,
+        branchPublisher: String?,
+        exDomain: String?,
+        exChapters: List<ExChapterDto>,
+    ): SChapter = SChapter.create().apply {
+        // A paid chapter with the same chapter on ExManga is readable there; a paid chapter
+        // without one stays locked (remanga only, requires purchase).
+        val exMatch = exDomain?.let {
+            exChapters.firstOrNull { ex -> ex.id == id || (ex.tome == tome && ex.chapter == chapter) }
+        }
+        val readableViaEx = exMatch != null
+
         val chapterTitle = buildString {
             if (tome != null) {
                 append("Том ").append(tome).append(". ")
@@ -135,16 +153,55 @@ class ChapterItemDto(
                 formatFreeDate(pubDate)?.let { append(" (free ").append(it).append(")") }
             }
         }
-        name = if (isLocked) "$LOCK_ICON$chapterTitle" else chapterTitle
-        scanlator = publishers.firstOrNull()?.name ?: branchPublisher
-        url = "$baseUrl/titles/".toHttpUrl()
-            .newBuilder()
-            .addPathSegment(dir)
-            .addQueryParameter("chapter", id.toString())
-            .build()
-            .let { it.encodedPath + it.encodedQuery?.let { q -> "?$q" }.orEmpty() }
-        date_upload = Instant.tryParse(uploadDate)
+        name = if (isLocked && !readableViaEx) "$LOCK_ICON$chapterTitle" else chapterTitle
+        scanlator = if (readableViaEx) {
+            "exmanga"
+        } else {
+            publishers.firstOrNull()?.name ?: branchPublisher
+        }
+        url = if (readableViaEx) {
+            "/chapter?id=${exMatch!!.id}"
+        } else {
+            "$baseUrl/titles/".toHttpUrl()
+                .newBuilder()
+                .addPathSegment(dir)
+                .addQueryParameter("chapter", id.toString())
+                .build()
+                .let { it.encodedPath + it.encodedQuery?.let { q -> "?$q" }.orEmpty() }
+        }
+        date_upload = parseChapterDate(uploadDate)
     }
+}
+
+// ExManga (exmanga.ru) mirrors the paid chapters of remanga titles; it keys history by the
+// remanga title's numeric id and reuses remanga chapter ids (matching falls back to volume+number).
+@Serializable
+class ExWrapperDto<T>(
+    val data: T,
+)
+
+@Serializable
+class ExChapterDto(
+    val id: Long,
+    val tome: Int = 0,
+    val chapter: String = "",
+)
+
+@Serializable
+class ExPageDto(
+    val height: Int = 0,
+    val link: String,
+)
+
+private val offsetDateFormat = DateTimeFormatter.ISO_OFFSET_DATE_TIME
+
+private val localDateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss")
+
+internal fun parseChapterDate(raw: String?): Long {
+    if (raw.isNullOrBlank()) return 0L
+    return offsetDateFormat.tryParseZonedDateTime(raw)
+        .takeIf { it != 0L }
+        ?: localDateFormat.tryParseDateTime(raw)
 }
 
 @Serializable
@@ -173,7 +230,7 @@ private fun parseStatus(id: Int?): Int = when (id) {
 }
 
 private fun formatFreeDate(raw: String?): String? {
-    val millis = Instant.tryParse(raw)
+    val millis = parseChapterDate(raw)
     if (millis == 0L) return null
     return java.time.Instant.ofEpochMilli(millis)
         .atZone(ZoneOffset.UTC)
