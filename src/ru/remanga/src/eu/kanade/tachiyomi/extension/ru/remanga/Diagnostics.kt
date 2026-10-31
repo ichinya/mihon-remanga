@@ -193,7 +193,10 @@ internal object DiagnosticsInterceptor : Interceptor {
         val response = try {
             chain.proceed(request)
         } catch (e: IOException) {
-            Diagnostics.failure(request, error = e)
+            // Canceled loads are normal (Coil cancels cover requests when scrolling) — not failures.
+            if (e.message != "Canceled" && e !is java.util.concurrent.CancellationException) {
+                Diagnostics.failure(request, error = e)
+            }
             throw e
         }
 
