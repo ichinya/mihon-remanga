@@ -173,11 +173,18 @@ class ChapterItemDto(
     }
 }
 
-// ExManga (exmanga.ru) mirrors the paid chapters of remanga titles; it keys history by the
+// ExManga (api.exmanga.org) mirrors the paid chapters of remanga titles; it keys history by the
 // remanga title's numeric id and reuses remanga chapter ids (matching falls back to volume+number).
+// Some chapters require an ExManga account: POST /auth/login {email,password} -> token.
 @Serializable
 class ExWrapperDto<T>(
     val data: T,
+)
+
+@Serializable
+class ExLoginDto(
+    val email: String,
+    val password: String,
 )
 
 @Serializable
@@ -195,7 +202,8 @@ class ExPageDto(
 
 private val offsetDateFormat = DateTimeFormatter.ISO_OFFSET_DATE_TIME
 
-private val localDateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss")
+// ISO_LOCAL_DATE_TIME accepts the API's fractional seconds (e.g. 2026-10-19T09:01:56.211560).
+private val localDateFormat = DateTimeFormatter.ISO_LOCAL_DATE_TIME
 
 internal fun parseChapterDate(raw: String?): Long {
     if (raw.isNullOrBlank()) return 0L

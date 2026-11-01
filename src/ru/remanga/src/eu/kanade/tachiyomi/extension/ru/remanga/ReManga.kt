@@ -16,12 +16,18 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonRequestBody
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -48,12 +54,67 @@ abstract class ReManga :
         get() = preferences.getString(EX_DOMAIN_PREF, DEFAULT_EX_DOMAIN)?.trim()?.trimEnd('/')
             ?: DEFAULT_EX_DOMAIN
 
-    // The magic plain UA is what exmanga.ru expects; the app's browser UA gets rejected.
-    private fun exHeaders() = okhttp3.Headers.Builder()
+    // The magic plain UA is what the ExManga backend expects; the app's browser UA gets rejected.
+    private fun exHeaders(): okhttp3.Headers = okhttp3.Headers.Builder()
         .set("User-Agent", "Tachiyomi")
         .set("Accept", "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
         .set("Referer", "$baseUrl/")
+        .apply {
+            preferences.getString(EX_TOKEN_PREF, null)?.takeIf { it.isNotBlank() }?.let {
+                set("Authorization", "Bearer $it")
+            }
+        }
         .build()
+
+    /**
+     * Some ExManga chapters require an account. Logs in with the stored email/password once and
+     * caches the token; returns false when credentials are missing or the login is rejected.
+     */
+    private suspend fun ensureExToken(): Boolean {
+        if (!preferences.getString(EX_TOKEN_PREF, null).isNullOrBlank()) return true
+        val email = preferences.getString(EX_EMAIL_PREF, null)?.trim().orEmpty()
+        val password = preferences.getString(EX_PASSWORD_PREF, null).orEmpty()
+        if (email.isEmpty() || password.isEmpty()) {
+            Diagnostics.info("exmanga: 401 требует аккаунт, но email/пароль не заданы")
+            return false
+        }
+        return runCatching {
+            val response = client.post(
+                "$exMangaDomain/auth/login",
+                exHeaders(),
+                ExLoginDto(email, password).toJsonRequestBody(),
+            )
+            response.use { resp ->
+                if (!resp.isSuccessful) {
+                    Diagnostics.info("exmanga: login failed HTTP ${resp.code}")
+                    false
+                } else {
+                    val data = resp.parseAs<ExWrapperDto<JsonElement>>().data
+                    val token = when (data) {
+                        is JsonPrimitive -> data.content
+                        is JsonObject ->
+                            (data["token"] ?: data["accessToken"] ?: data["access_token"] ?: data["jwt"])
+                                ?.jsonPrimitive?.contentOrNull
+                        else -> null
+                    }
+                    if (token.isNullOrBlank()) {
+                        Diagnostics.info("exmanga: login response has no token")
+                        false
+                    } else {
+                        preferences.edit().putString(EX_TOKEN_PREF, token).apply()
+                        Diagnostics.info("exmanga: login OK, token saved")
+                        true
+                    }
+                }
+            }
+        }.getOrDefault(false)
+    }
+
+    /** Library entries migrated from the old extension store "/api/titles/{id-or-dir}/" — extract the key. */
+    private fun String.toMangaDir(): String = substringAfterLast("/titles/", this)
+        .substringBefore("?")
+        .trim('/')
+        .substringBefore("/")
 
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(3, 1.seconds)
         .addGlobalSignR46TrustAnchor()
@@ -87,6 +148,29 @@ abstract class ReManga :
             title = "API-домен ExManga"
             summary = "По умолчанию $DEFAULT_EX_DOMAIN"
             setDefaultValue(DEFAULT_EX_DOMAIN)
+        }.also(screen::addPreference)
+
+        EditTextPreference(screen.context).apply {
+            key = EX_EMAIL_PREF
+            title = "ExManga: email аккаунта"
+            summary = "Нужен для платных глав, закрытых аккаунтом"
+            setDefaultValue("")
+            setOnPreferenceChangeListener { _, newValue ->
+                preferences.edit().remove(EX_TOKEN_PREF).apply()
+                newValue is String
+            }
+        }.also(screen::addPreference)
+
+        EditTextPreference(screen.context).apply {
+            key = EX_PASSWORD_PREF
+            title = "ExManga: пароль аккаунта"
+            summary = if (preferences.getString(EX_TOKEN_PREF, null) != null) "вход выполнен" else "не задан"
+            setDefaultValue("")
+            setOnBindEditTextListener { it.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD }
+            setOnPreferenceChangeListener { _, newValue ->
+                preferences.edit().remove(EX_TOKEN_PREF).apply()
+                newValue is String
+            }
         }.also(screen::addPreference)
 
         addDiagnosticsPreferences(screen)
@@ -181,15 +265,18 @@ abstract class ReManga :
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val title = client.get(titleApiUrl(manga.url)).parseAs<TitleDetailDto>().content
+        val dir = manga.url.toMangaDir()
+        val title = client.get(titleApiUrl(dir)).parseAs<TitleDetailDto>().content
         val updatedManga = if (fetchDetails) title.toSManga(manga, baseUrl) else manga
-        val updatedChapters = if (fetchChapters) fetchChapters(title, manga.url) else chapters
+        val updatedChapters = if (fetchChapters) fetchChapters(title, dir) else chapters
         return SMangaUpdate(updatedManga, updatedChapters)
     }
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
-        if (url.pathSegments.firstOrNull() !in setOf("titles", "manga")) return null
-        val dir = url.pathSegments.lastOrNull() ?: return null
+        val segments = url.pathSegments.filter { it.isNotBlank() }
+        // Accepts current (/titles/{dir}, /manga/{dir}) and legacy (/api/titles/{id-or-dir}/) paths.
+        if ("titles" !in segments && "manga" !in segments) return null
+        val dir = segments.lastOrNull() ?: return null
         val manga = SManga.create().apply { this.url = dir }
         return client.get(titleApiUrl(dir)).parseAs<TitleDetailDto>().content.toSManga(manga, baseUrl)
     }
@@ -216,9 +303,18 @@ abstract class ReManga :
     private suspend fun fetchExPages(chapter: SChapter): List<Page> {
         val exId = "$exMangaDomain${chapter.url}".toHttpUrlOrNull()?.queryParameter("id")
             ?: return emptyList()
-        val response = client.get("$exMangaDomain/chapter?id=$exId", exHeaders(), ensureSuccess = false)
-        if (!response.isSuccessful) {
+        var response = client.get("$exMangaDomain/chapter?id=$exId", exHeaders(), ensureSuccess = false)
+        // Some chapters are account-gated: log in with the stored credentials and retry once.
+        if (response.code == 401 && ensureExToken()) {
             response.close()
+            response = client.get("$exMangaDomain/chapter?id=$exId", exHeaders(), ensureSuccess = false)
+        }
+        if (!response.isSuccessful) {
+            val code = response.code
+            response.close()
+            if (code == 401) {
+                throw Exception("Глава доступна только с аккаунтом ExManga — укажите email/пароль в настройках источника ⚙️")
+            }
             return emptyList()
         }
         return response.use { it.parseAs<ExWrapperDto<List<List<ExPageDto>>>>() }
@@ -311,6 +407,9 @@ abstract class ReManga :
         const val EX_PAID_PREF = "read_paid_via_exmanga"
         const val EX_DOMAIN_PREF = "exmanga_domain"
         const val DEFAULT_EX_DOMAIN = "https://api.exmanga.org"
+        const val EX_EMAIL_PREF = "exmanga_email"
+        const val EX_PASSWORD_PREF = "exmanga_password"
+        const val EX_TOKEN_PREF = "exmanga_token"
     }
 
     override fun imageRequest(page: Page): Request {
