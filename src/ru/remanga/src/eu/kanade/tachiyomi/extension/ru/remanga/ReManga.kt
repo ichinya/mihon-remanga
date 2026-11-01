@@ -184,6 +184,20 @@ abstract class ReManga :
             setDefaultValue("")
         }.also(screen::addPreference)
 
+        SwitchPreferenceCompat(screen.context).apply {
+            key = AUTO_UPLOAD_PREF
+            title = "Автоотправка логов на сервер"
+            summary = "При ошибке лог сам уходит на logging.tw1.ru (не чаще раза в 5 минут)"
+            setDefaultValue(false)
+            setOnPreferenceChangeListener { _, newValue ->
+                Diagnostics.autoUploadEnabled = newValue as Boolean
+                true
+            }
+        }.also {
+            Diagnostics.autoUploadEnabled = preferences.getBoolean(AUTO_UPLOAD_PREF, false)
+            screen.addPreference(it)
+        }
+
         addDiagnosticsPreferences(screen)
     }
 
@@ -221,6 +235,20 @@ abstract class ReManga :
             summary = "Файл: ${Diagnostics.logPath()}",
             action = { shareLog(context) },
         )
+        actionPreference(
+            key = "diagnostics_upload",
+            title = "Отправить лог на сервер",
+            summary = "https://logging.tw1.ru/ — сразу, без ожидания",
+        ) {
+            Toast.makeText(context, "Отправка…", Toast.LENGTH_SHORT).show()
+            CoroutineScope(Dispatchers.IO).launch {
+                val (ok, msg) = Diagnostics.uploadNow()
+                Diagnostics.info(if (ok) "upload: OK ($msg)" else "upload: $msg")
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
+            }
+        }
         actionPreference(
             key = "diagnostics_clear_log",
             title = "Очистить лог диагностики",
@@ -474,6 +502,7 @@ abstract class ReManga :
         const val CHAPTERS_PER_PAGE = 100
         const val SHOW_LOCKED_PREF = "show_locked_chapters"
         const val SHOW_FREE_DATE_PREF = "show_free_publication_date"
+        const val AUTO_UPLOAD_PREF = "auto_upload_logs"
         const val EX_PAID_PREF = "read_paid_via_exmanga"
         const val EX_DOMAIN_PREF = "exmanga_domain"
         const val DEFAULT_EX_DOMAIN = "https://api.exmanga.org"

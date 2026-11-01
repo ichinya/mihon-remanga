@@ -4,7 +4,12 @@ import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
 import keiyoushi.utils.applicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import okhttp3.FormBody
 import okhttp3.Interceptor
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import java.io.File
@@ -31,9 +36,18 @@ internal object Diagnostics {
     private const val MAX_FILE_BYTES = 256 * 1024
     private const val TRIM_TO_BYTES = 64 * 1024
     private const val TOAST_INTERVAL_MS = 60_000L
+    private const val UPLOAD_THROTTLE_MS = 5 * 60_000L
+    private const val UPLOAD_MAX_LEN = 131072
+
+    private const val LOG_SERVER = "https://logging.tw1.ru/api.php"
+    private const val UPLOAD_TOKEN = "remanga-diag-2026"
+
+    @Volatile
+    var autoUploadEnabled = false
 
     private val lock = Any()
     private var lastToastAt = 0L
+    private var lastUploadAt = 0L
 
     private val timestampFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
@@ -87,6 +101,7 @@ internal object Diagnostics {
                     .apply()
             }
             showToast()
+            if (autoUploadEnabled) uploadAsync()
         }
     }
 
@@ -178,6 +193,48 @@ internal object Diagnostics {
                 .apply()
         }
     }
+
+    fun deviceId(): String {
+        val prefs = applicationContext.getSharedPreferences("remanga_diagnostics", 0)
+        return prefs.getString("device_id", null) ?: java.util.UUID.randomUUID().toString().also {
+            prefs.edit().putString("device_id", it).apply()
+        }
+    }
+
+    private fun deviceName(): String = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE}"
+
+    /** Fire-and-forget upload, throttled to once per 5 minutes for the automatic mode. */
+    fun uploadAsync(done: ((Boolean, String) -> Unit)? = null) {
+        val now = System.currentTimeMillis()
+        synchronized(lock) {
+            if (now - lastUploadAt < UPLOAD_THROTTLE_MS && done == null) return
+            lastUploadAt = now
+        }
+        CoroutineScope(Dispatchers.IO).launch {
+            val (ok, msg) = uploadNow()
+            done?.invoke(ok, msg)
+        }
+    }
+
+    fun uploadNow(): Pair<Boolean, String> = runCatching {
+        val client = OkHttpClient()
+        val body = FormBody.Builder()
+            .add("action", "upload")
+            .add("token", UPLOAD_TOKEN)
+            .add("device", deviceId())
+            .add("model", deviceName())
+            .add("ver", selfVersion())
+            .add("log", readLog().take(UPLOAD_MAX_LEN))
+            .build()
+        val request = Request.Builder().url(LOG_SERVER).post(body).build()
+        client.newCall(request).execute().use { resp ->
+            if (resp.isSuccessful) {
+                true to "Лог отправлен на сервер"
+            } else {
+                false to "Сервер вернул HTTP ${resp.code}"
+            }
+        }
+    }.getOrElse { false to "Ошибка отправки: ${it.message?.take(80)}" }
 }
 
 /**
