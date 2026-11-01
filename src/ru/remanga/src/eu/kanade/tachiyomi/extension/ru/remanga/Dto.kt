@@ -6,6 +6,7 @@ import keiyoushi.utils.tryParseDateTime
 import keiyoushi.utils.tryParseZonedDateTime
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.Jsoup
 import java.time.ZoneOffset
@@ -185,6 +186,19 @@ class ExWrapperDto<T>(
 class ExLoginDto(
     val email: String,
     val password: String,
+)
+
+@Serializable
+class ExRegisterDto(
+    val name: String,
+    val email: String,
+    val password: String,
+)
+
+@Serializable
+class ExAuthResponseDto(
+    val success: Boolean = false,
+    val data: JsonElement? = null,
 )
 
 @Serializable

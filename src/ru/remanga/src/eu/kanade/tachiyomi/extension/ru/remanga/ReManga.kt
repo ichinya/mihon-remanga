@@ -23,6 +23,10 @@ import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -173,6 +177,13 @@ abstract class ReManga :
             }
         }.also(screen::addPreference)
 
+        EditTextPreference(screen.context).apply {
+            key = EX_NAME_PREF
+            title = "ExManga: имя для регистрации"
+            summary = "До 12 символов — только если аккаунта ещё нет"
+            setDefaultValue("")
+        }.also(screen::addPreference)
+
         addDiagnosticsPreferences(screen)
     }
 
@@ -219,6 +230,11 @@ abstract class ReManga :
                 Toast.makeText(context, "Лог очищен", Toast.LENGTH_SHORT).show()
             },
         )
+        actionPreference(
+            key = "exmanga_register",
+            title = "Зарегистрироваться в ExManga",
+            summary = "Создаёт аккаунт по имени/email/паролю выше и входит в него",
+        ) { registerExAccount(context) }
     }
 
     private fun shareLog(context: Context) {
@@ -230,6 +246,49 @@ abstract class ReManga :
         }
         runCatching {
             context.startActivity(Intent.createChooser(intent, "Лог диагностики Remanga"))
+        }
+    }
+
+    /**
+     * Creates an ExManga account from the name/email/password preferences. Registration is
+     * normally done in the browser extension's popup; phone users don't have that, so it is
+     * replicated here. The API answers with a JWT in `data` on success, or `success:false`
+     * with the reason in `data`.
+     */
+    private fun registerExAccount(context: Context) {
+        val name = preferences.getString(EX_NAME_PREF, null)?.trim().orEmpty()
+        val email = preferences.getString(EX_EMAIL_PREF, null)?.trim().orEmpty()
+        val password = preferences.getString(EX_PASSWORD_PREF, null).orEmpty()
+        if (name.isEmpty() || email.isEmpty() || password.isEmpty()) {
+            Toast.makeText(context, "Заполните имя, email и пароль выше", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (name.length > 12 || password.length < 6) {
+            Toast.makeText(context, "Имя — до 12 символов, пароль — от 6 символов", Toast.LENGTH_LONG).show()
+            return
+        }
+        preferences.edit().remove(EX_TOKEN_PREF).apply()
+        CoroutineScope(Dispatchers.IO).launch {
+            val result = runCatching {
+                client.post("$exMangaDomain/auth/register", exHeaders(), ExRegisterDto(name, email, password).toJsonRequestBody())
+                    .use { it.parseAs<ExAuthResponseDto>() }
+            }
+            val (ok, message) = result.fold(
+                onSuccess = { resp ->
+                    val token = (resp.data as? JsonPrimitive)?.content
+                    if (resp.success && !token.isNullOrBlank()) {
+                        preferences.edit().putString(EX_TOKEN_PREF, token).apply()
+                        true to "Аккаунт создан, вход выполнен"
+                    } else {
+                        false to "Ошибка: ${(resp.data as? JsonPrimitive)?.content ?: "ответ сервера не распознан"}"
+                    }
+                },
+                onFailure = { false to "Ошибка сети: ${it.message?.take(80)}" },
+            )
+            Diagnostics.info("exmanga: register ${if (ok) "OK" else "failed: $message"}")
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -410,6 +469,7 @@ abstract class ReManga :
         const val EX_EMAIL_PREF = "exmanga_email"
         const val EX_PASSWORD_PREF = "exmanga_password"
         const val EX_TOKEN_PREF = "exmanga_token"
+        const val EX_NAME_PREF = "exmanga_name"
     }
 
     override fun imageRequest(page: Page): Request {
