@@ -348,7 +348,11 @@ abstract class ReManga :
             ?: return emptyList()
         val response = client.get(chapterApiUrl(chapterId), ensureSuccess = false)
         if (!response.isSuccessful) {
+            val code = response.code
             response.close()
+            if (code == 401 || code == 403) {
+                throw Exception("Глава платная (покупка на remanga) или требует входа на сайт; главы с ExManga читаются через ExManga")
+            }
             return emptyList()
         }
         return response.use { it.parseAs<ChapterDetailDto>() }
