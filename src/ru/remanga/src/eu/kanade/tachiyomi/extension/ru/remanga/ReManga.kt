@@ -389,6 +389,13 @@ abstract class ReManga :
                 // "#ex" marks ExManga images for imageRequest(); fragments are never sent to servers.
                 Page(index, imageUrl = "$link#ex")
             }
+            .also { pages ->
+                // ExManga returns named placeholder images when the chapter's content isn't in the
+                // community pool yet — fail with a readable message instead of a 404 storm.
+                if (pages.isNotEmpty() && pages.all { it.imageUrl?.contains("/tachiyomi", ignoreCase = true) == true }) {
+                    throw Exception("Содержимое главы пока не загружено в пул ExManga — зайдите позже")
+                }
+            }
     }
 
     private suspend fun fetchCatalogList(page: Int, params: HttpUrl.Builder.() -> Unit): MangasPage {
