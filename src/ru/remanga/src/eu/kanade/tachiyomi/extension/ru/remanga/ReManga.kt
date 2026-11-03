@@ -232,7 +232,7 @@ abstract class ReManga :
         actionPreference(
             key = "diagnostics_share_log",
             title = "Лог диагностики — поделиться",
-            summary = "Файл: ${Diagnostics.logPath()}",
+            summary = "Папка: ${Diagnostics.logsDir()}",
             action = { shareLog(context) },
         )
         actionPreference(
@@ -269,7 +269,7 @@ abstract class ReManga :
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_SUBJECT, "Remanga diagnostics log")
-            putExtra(Intent.EXTRA_TEXT, Diagnostics.readLog())
+            putExtra(Intent.EXTRA_TEXT, Diagnostics.exportTxt())
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         runCatching {
@@ -355,6 +355,8 @@ abstract class ReManga :
         val dir = manga.url.toMangaDir()
         val title = client.get(titleApiUrl(dir)).parseAs<TitleDetailDto>().content
         val updatedManga = if (fetchDetails) title.toSManga(manga, baseUrl) else manga
+        Diagnostics.ctxManga = updatedManga.title
+        Diagnostics.ctxChapter = null
         val updatedChapters = if (fetchChapters) fetchChapters(title, dir) else chapters
         return SMangaUpdate(updatedManga, updatedChapters)
     }
@@ -371,6 +373,7 @@ abstract class ReManga :
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/manga/${manga.url}"
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
+        Diagnostics.ctxChapter = chapter.name
         if (chapter.scanlator == "exmanga") return fetchExPages(chapter)
         val chapterId = "$baseUrl${chapter.url}".toHttpUrlOrNull()?.queryParameter("chapter")
             ?: return emptyList()
