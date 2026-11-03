@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Remanga"
-    versionCode = 117
+    versionCode = 174
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
@@ -27,7 +27,7 @@ keiyoushi {
 
 android {
     defaultConfig {
-        // "1.6." + 117 folds to "1.6.117" at compile time; follows the CI-bumped versionCode.
+        // "1.6." + 174: CI adds run number, next build = 1.6.200 at compile time; follows the CI-bumped versionCode.
         buildConfigField("String", "EXT_VERSION", "\"1.6.\" + ${keiyoushi.versionCode.get()}")
     }
 }
