@@ -7,37 +7,42 @@ import keiyoushi.utils.tryParseZonedDateTime
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.longOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.Jsoup
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
+// v2 API pagination: `next` is a URL string in search/catalog, a page number in chapter lists,
+// and null on the last page — all three arrive as JsonPrimitive (or JsonNull).
 @Serializable
 class CatalogDto(
-    val content: List<CatalogItemDto> = emptyList(),
-    val props: CatalogPropsDto = CatalogPropsDto(),
-)
-
-@Serializable
-class CatalogPropsDto(
-    private val page: Int = 0,
-    @SerialName("total_pages") private val totalPages: Int = 0,
+    val next: JsonPrimitive? = null,
+    val results: List<CatalogItemDto> = emptyList(),
 ) {
-    fun hasNextPage(): Boolean = page < totalPages
+    fun hasNextPage(): Boolean = hasNext(next)
+}
+
+internal fun hasNext(next: JsonPrimitive?): Boolean {
+    next ?: return false
+    next.longOrNull?.let { return it > 0 }
+    val s = next.contentOrNull ?: return false
+    return s.isNotEmpty() && s != "null"
 }
 
 @Serializable
 class CatalogItemDto(
     private val dir: String,
-    @SerialName("rus_name") private val rusName: String? = null,
-    @SerialName("en_name") private val enName: String? = null,
     @SerialName("main_name") private val mainName: String? = null,
-    private val img: CoverDto? = null,
+    @SerialName("secondary_name") private val secondaryName: String? = null,
+    private val cover: CoverDto? = null,
 ) {
     fun toSManga(baseUrl: String): SManga = SManga.create().apply {
         url = dir
-        title = rusName ?: enName ?: mainName ?: dir
-        thumbnail_url = img?.high?.takeIf { it.isNotEmpty() }?.let { "$baseUrl$it" }
+        title = mainName ?: secondaryName ?: dir
+        thumbnail_url = cover?.high?.takeIf { it.isNotEmpty() }?.let { "$baseUrl$it" }
     }
 }
 
@@ -46,28 +51,27 @@ class CoverDto(
     val high: String? = null,
 )
 
-@Serializable
-class TitleDetailDto(
-    val content: TitleContentDto,
-)
-
+// v2 title details are a flat object resolved by DIR (numeric ids are not accepted).
 @Serializable
 class TitleContentDto(
     val id: Long = 0L,
-    @SerialName("rus_name") private val rusName: String? = null,
-    @SerialName("en_name") private val enName: String? = null,
     @SerialName("main_name") private val mainName: String? = null,
+    @SerialName("secondary_name") private val secondaryName: String? = null,
     private val description: String? = null,
     private val status: StatusDto? = null,
+    private val cover: CoverDto? = null,
     private val img: CoverDto? = null,
     private val genres: List<NameDto> = emptyList(),
     private val categories: List<NameDto> = emptyList(),
     private val creators: Map<String, List<CreatorDto>> = emptyMap(),
     val branches: List<BranchDto> = emptyList(),
 ) {
+    internal val hasData: Boolean
+        get() = mainName != null || branches.isNotEmpty()
+
     fun toSManga(manga: SManga, baseUrl: String): SManga = manga.apply {
-        title = rusName ?: enName ?: mainName ?: this.title
-        thumbnail_url = img?.high?.takeIf { it.isNotEmpty() }?.let { "$baseUrl$it" } ?: thumbnail_url
+        title = mainName ?: secondaryName ?: this.title
+        thumbnail_url = (cover ?: img)?.high?.takeIf { it.isNotEmpty() }?.let { "$baseUrl$it" } ?: thumbnail_url
         description = this@TitleContentDto.description?.let { Jsoup.parseBodyFragment(it, baseUrl).text() }
         genre = (genres.mapNotNull { it.name } + categories.mapNotNull { it.name })
             .distinct()
@@ -108,8 +112,11 @@ class BranchDto(
 
 @Serializable
 class ChaptersDto(
-    val content: List<ChapterItemDto> = emptyList(),
-)
+    val next: JsonPrimitive? = null,
+    val results: List<ChapterItemDto> = emptyList(),
+) {
+    fun hasNextPage(): Boolean = hasNext(next)
+}
 
 @Serializable
 class ChapterItemDto(
@@ -228,12 +235,14 @@ internal fun parseChapterDate(raw: String?): Long {
 
 @Serializable
 class ChapterDetailDto(
-    val content: ChapterDetailContentDto,
+    val server: ServerDto? = null,
+    val pages: List<List<PageDto>> = emptyList(),
 )
 
 @Serializable
-class ChapterDetailContentDto(
-    val pages: List<List<PageDto>> = emptyList(),
+class ServerDto(
+    val link: String? = null,
+    @SerialName("fallback_link") val fallbackLink: String? = null,
 )
 
 @Serializable

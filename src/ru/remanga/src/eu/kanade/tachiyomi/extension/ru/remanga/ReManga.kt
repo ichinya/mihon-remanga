@@ -353,7 +353,10 @@ abstract class ReManga :
         fetchChapters: Boolean,
     ): SMangaUpdate {
         val dir = manga.url.toMangaDir()
-        val title = client.get(titleApiUrl(dir)).parseAs<TitleDetailDto>().content
+        val title = client.get(titleApiUrl(dir)).parseAs<TitleContentDto>()
+        if (!title.hasData) {
+            throw Exception("Тайтл недоступен в новом API${if (dir.all { it.isDigit() }) " — удалите его из библиотеки и добавьте заново через поиск (старый формат адреса)" else ""}")
+        }
         val updatedManga = if (fetchDetails) title.toSManga(manga, baseUrl) else manga
         Diagnostics.ctxManga = updatedManga.title
         Diagnostics.ctxChapter = null
@@ -367,7 +370,9 @@ abstract class ReManga :
         if ("titles" !in segments && "manga" !in segments) return null
         val dir = segments.lastOrNull() ?: return null
         val manga = SManga.create().apply { this.url = dir }
-        return client.get(titleApiUrl(dir)).parseAs<TitleDetailDto>().content.toSManga(manga, baseUrl)
+        val title = client.get(titleApiUrl(dir)).parseAs<TitleContentDto>()
+        if (!title.hasData) return null
+        return title.toSManga(manga, baseUrl)
     }
 
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/manga/${manga.url}"
@@ -386,12 +391,17 @@ abstract class ReManga :
             }
             return emptyList()
         }
-        return response.use { it.parseAs<ChapterDetailDto>() }
-            .content
-            .pages
+        val detail = response.use { it.parseAs<ChapterDetailDto>() }
+        val serverBase = (detail.server?.link ?: "$baseUrl/").trimEnd('/')
+        // пустые pages у платной главы: 401 перехвачен выше, здесь просто нет контента
+        return detail.pages
             .flatten()
             .sortedBy { it.id }
-            .mapIndexed { index, page -> Page(index, imageUrl = page.link.toAbsoluteUrl()) }
+            .mapIndexed { index, page ->
+                val link = page.link.takeIf { it.startsWith("http") }
+                    ?: (serverBase + "/" + page.link.trimStart('/'))
+                Page(index, imageUrl = link)
+            }
     }
 
     private suspend fun fetchExPages(chapter: SChapter): List<Page> {
@@ -431,14 +441,14 @@ abstract class ReManga :
 
     private suspend fun fetchCatalogList(page: Int, params: HttpUrl.Builder.() -> Unit): MangasPage {
         val dto = client.get(
-            "$API_URL/search/catalog/".toHttpUrl().newBuilder()
+            "$API_URL/v2/search/catalog/".toHttpUrl().newBuilder()
                 .addQueryParameter("page", page.toString())
                 .addQueryParameter("count", PAGE_SIZE.toString())
                 .apply(params)
                 .build(),
         ).parseAs<CatalogDto>()
-        val mangas = dto.content.mapNotNull { it.toSManga(baseUrl) }
-        return MangasPage(mangas, dto.props.hasNextPage())
+        val mangas = dto.results.mapNotNull { it.toSManga(baseUrl) }
+        return MangasPage(mangas, dto.hasNextPage())
     }
 
     private suspend fun fetchChapters(title: TitleContentDto, dir: String): List<SChapter> {
@@ -463,7 +473,8 @@ abstract class ReManga :
         for (branch in title.branches) {
             var page = 1
             while (true) {
-                val items = client.get(chaptersApiUrl(branch.id, page)).parseAs<ChaptersDto>().content
+                val dto = client.get(chaptersApiUrl(branch.id, page)).parseAs<ChaptersDto>()
+                val items = dto.results
                 if (items.isEmpty()) break
                 chapters += items.mapNotNull { item ->
                     if (item.isLocked && !showLocked) return@mapNotNull null
@@ -473,7 +484,7 @@ abstract class ReManga :
                     }
                     chapter
                 }
-                if (items.size < CHAPTERS_PER_PAGE) break
+                if (!dto.hasNextPage()) break
                 page++
             }
         }
@@ -481,17 +492,16 @@ abstract class ReManga :
         return chapters
     }
 
-    private fun titleApiUrl(dir: String): HttpUrl = "$API_URL/titles/".toHttpUrl().newBuilder().addPathSegment(dir).build()
+    private fun titleApiUrl(dir: String): HttpUrl = "$API_URL/v2/titles/".toHttpUrl().newBuilder().addPathSegment(dir).build()
 
-    private fun chaptersApiUrl(branchId: Long, page: Int): HttpUrl = "$API_URL/titles/chapters/".toHttpUrl().newBuilder()
+    private fun chaptersApiUrl(branchId: Long, page: Int): HttpUrl = "$API_URL/v2/titles/chapters/".toHttpUrl().newBuilder()
         .addQueryParameter("branch_id", branchId.toString())
         .addQueryParameter("ordering", "-index")
         .addQueryParameter("page", page.toString())
         .addQueryParameter("count", CHAPTERS_PER_PAGE.toString())
-        .addQueryParameter("user_data", "1")
         .build()
 
-    private fun chapterApiUrl(chapterId: String): String = "$API_URL/titles/chapters/$chapterId/"
+    private fun chapterApiUrl(chapterId: String): String = "$API_URL/v2/titles/chapters/$chapterId/"
 
     private fun String.toAbsoluteUrl(): String = when {
         startsWith("http://") || startsWith("https://") -> this
