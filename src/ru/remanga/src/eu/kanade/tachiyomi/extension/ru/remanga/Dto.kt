@@ -6,9 +6,14 @@ import keiyoushi.utils.tryParseDateTime
 import keiyoushi.utils.tryParseZonedDateTime
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.Jsoup
@@ -63,7 +68,9 @@ class TitleContentDto(
     private val img: CoverDto? = null,
     private val genres: List<NameDto> = emptyList(),
     private val categories: List<NameDto> = emptyList(),
-    private val creators: Map<String, List<CreatorDto>> = emptyMap(),
+    // v2 sends a flat array of {id,name,cover}; some responses may still use the v1 role map
+    // {"1":[…],"2":[…]} — accept both.
+    private val creators: JsonElement? = null,
     val branches: List<BranchDto> = emptyList(),
 ) {
     internal val hasData: Boolean
@@ -76,9 +83,29 @@ class TitleContentDto(
         genre = (genres.mapNotNull { it.name } + categories.mapNotNull { it.name })
             .distinct()
             .joinToString()
-        author = creators["1"].orEmpty().mapNotNull { it.name }.distinct().joinToString()
-        artist = creators["2"].orEmpty().mapNotNull { it.name }.distinct().joinToString()
+        val (authorNames, artistNames) = extractCreators(creators)
+        author = authorNames
+        artist = artistNames.ifEmpty { authorNames }
         status = parseStatus(this@TitleContentDto.status?.id)
+    }
+}
+
+private fun extractCreators(el: JsonElement?): Pair<String, String> {
+    when (el) {
+        is JsonArray -> {
+            val names = el.mapNotNull { (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull }
+                .filter { it.isNotBlank() }
+                .distinct()
+            return names.joinToString() to ""
+        }
+        is JsonObject -> {
+            fun role(key: String): List<String> = el[key]?.jsonArray?.mapNotNull { it.jsonObject["name"]?.jsonPrimitive?.contentOrNull }
+                .orEmpty()
+                .filter { it.isNotBlank() }
+                .distinct()
+            return role("1").joinToString() to role("2").joinToString()
+        }
+        else -> return "" to ""
     }
 }
 
@@ -89,11 +116,6 @@ class StatusDto(
 
 @Serializable
 class NameDto(
-    val name: String? = null,
-)
-
-@Serializable
-class CreatorDto(
     val name: String? = null,
 )
 
