@@ -416,8 +416,9 @@ abstract class ReManga :
         if (!response.isSuccessful) {
             val code = response.code
             response.close()
-            if (code == 401) {
-                throw Exception("Глава доступна только с аккаунтом ExManga — укажите email/пароль в настройках источника ⚙️")
+            when (code) {
+                401 -> throw Exception("Глава доступна только с аккаунтом ExManga — укажите email/пароль в настройках источника ⚙️")
+                404 -> throw Exception("Главы нет в пуле ExManga (удалена или ещё не залита) — зайдите позже")
             }
             return emptyList()
         }

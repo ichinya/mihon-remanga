@@ -183,7 +183,8 @@ class ChapterItemDto(
                 formatFreeDate(pubDate)?.let { append(" (free ").append(it).append(")") }
             }
         }
-        name = if (isLocked && !readableViaEx) "$LOCK_ICON$chapterTitle" else chapterTitle
+        name = if (isLocked && !readableViaEx) "$NO_EX_ICON$chapterTitle" else chapterTitle
+        chapter_number = chapter?.toFloatOrNull() ?: 0f
         scanlator = if (readableViaEx) {
             "exmanga"
         } else {
@@ -293,4 +294,5 @@ private fun formatFreeDate(raw: String?): String? {
 
 private val displayDateFormat = DateTimeFormatter.ofPattern("dd.MM.yyyy")
 
-private const val LOCK_ICON = "\uD83D\uDD12 "
+// ⛔ marks paid chapters that are NOT on ExManga either — they can't be read without a purchase.
+private const val NO_EX_ICON = "\u26D4 "
