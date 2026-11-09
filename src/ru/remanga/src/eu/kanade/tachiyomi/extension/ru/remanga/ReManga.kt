@@ -489,8 +489,11 @@ abstract class ReManga :
                             Diagnostics.info("exmanga: история требует аккаунт — вход не выполнен")
                             emptyList()
                         }
-                        response.isSuccessful ->
-                            response.parseAs<ExWrapperDto<List<ExChapterDto>>>().data
+                        response.isSuccessful -> {
+                            val data = response.parseAs<ExWrapperDto<List<ExChapterDto>>>().data
+                            Diagnostics.info("exmanga: история OK (${data.size} глав в пуле)")
+                            data
+                        }
                         else -> emptyList()
                     }
                 }
