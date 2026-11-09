@@ -87,10 +87,11 @@ abstract class ReManga :
                 "$exMangaDomain/auth/login",
                 exHeaders(),
                 ExLoginDto(email, password).toJsonRequestBody(),
+                ensureSuccess = false,
             )
             response.use { resp ->
                 if (!resp.isSuccessful) {
-                    Diagnostics.info("exmanga: login failed HTTP ${resp.code}")
+                    Diagnostics.info("exmanga: login failed: ${exReason(resp)}")
                     false
                 } else {
                     val data = resp.parseAs<ExWrapperDto<JsonElement>>().data
@@ -113,6 +114,12 @@ abstract class ReManga :
             }
         }.getOrDefault(false)
     }
+
+    /** Extracts the human-readable reason from an ExManga error body ("data" field), if present. */
+    private fun exReason(resp: Response): String = runCatching {
+        val data = resp.parseAs<ExAuthResponseDto>().data
+        (data as? JsonPrimitive)?.content ?: "HTTP ${resp.code}"
+    }.getOrDefault("HTTP ${resp.code}")
 
     /** Library entries migrated from the old extension store "/api/titles/{id-or-dir}/" — extract the key. */
     private fun String.toMangaDir(): String = substringAfterLast("/titles/", this)
@@ -297,22 +304,27 @@ abstract class ReManga :
         }
         preferences.edit().remove(EX_TOKEN_PREF).apply()
         CoroutineScope(Dispatchers.IO).launch {
-            val result = runCatching {
-                client.post("$exMangaDomain/auth/register", exHeaders(), ExRegisterDto(name, email, password).toJsonRequestBody())
-                    .use { it.parseAs<ExAuthResponseDto>() }
-            }
-            val (ok, message) = result.fold(
-                onSuccess = { resp ->
-                    val token = (resp.data as? JsonPrimitive)?.content
-                    if (resp.success && !token.isNullOrBlank()) {
-                        preferences.edit().putString(EX_TOKEN_PREF, token).apply()
-                        true to "Аккаунт создан, вход выполнен"
+            val (ok, message) = runCatching {
+                client.post(
+                    "$exMangaDomain/auth/register",
+                    exHeaders(),
+                    ExRegisterDto(name, email, password).toJsonRequestBody(),
+                    ensureSuccess = false,
+                ).use { resp ->
+                    if (!resp.isSuccessful) {
+                        false to exReason(resp)
                     } else {
-                        false to "Ошибка: ${(resp.data as? JsonPrimitive)?.content ?: "ответ сервера не распознан"}"
+                        val body = resp.parseAs<ExAuthResponseDto>()
+                        val token = (body.data as? JsonPrimitive)?.content
+                        if (body.success && !token.isNullOrBlank()) {
+                            preferences.edit().putString(EX_TOKEN_PREF, token).apply()
+                            true to "Аккаунт создан, вход выполнен"
+                        } else {
+                            false to "Ошибка: ${(body.data as? JsonPrimitive)?.content ?: "ответ сервера не распознан"}"
+                        }
                     }
-                },
-                onFailure = { false to "Ошибка сети: ${it.message?.take(80)}" },
-            )
+                }
+            }.getOrElse { e -> false to "Ошибка сети: ${e.message?.take(80)}" }
             Diagnostics.info("exmanga: register ${if (ok) "OK" else "failed: $message"}")
             withContext(Dispatchers.Main) {
                 Toast.makeText(context, message, Toast.LENGTH_LONG).show()
@@ -353,15 +365,25 @@ abstract class ReManga :
         fetchChapters: Boolean,
     ): SMangaUpdate {
         val dir = manga.url.toMangaDir()
-        val title = client.get(titleApiUrl(dir)).parseAs<TitleContentDto>()
-        if (!title.hasData) {
-            throw Exception("Тайтл недоступен в новом API${if (dir.all { it.isDigit() }) " — удалите его из библиотеки и добавьте заново через поиск (старый формат адреса)" else ""}")
-        }
+        val title = fetchTitle(dir)
         val updatedManga = if (fetchDetails) title.toSManga(manga, baseUrl) else manga
         Diagnostics.ctxManga = updatedManga.title
         Diagnostics.ctxChapter = null
         val updatedChapters = if (fetchChapters) fetchChapters(title, dir) else chapters
         return SMangaUpdate(updatedManga, updatedChapters)
+    }
+
+    private suspend fun fetchTitle(dir: String): TitleContentDto {
+        val response = client.get(titleApiUrl(dir), ensureSuccess = false)
+        if (!response.isSuccessful) {
+            val code = response.code
+            response.close()
+            if (code == 404) {
+                throw Exception("Тайтл удалён с remanga — уберите его из библиотеки или обновите через поиск")
+            }
+            throw Exception("Ошибка загрузки тайтла: HTTP $code")
+        }
+        return response.use { it.parseAs<TitleContentDto>() }
     }
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
@@ -370,7 +392,7 @@ abstract class ReManga :
         if ("titles" !in segments && "manga" !in segments) return null
         val dir = segments.lastOrNull() ?: return null
         val manga = SManga.create().apply { this.url = dir }
-        val title = client.get(titleApiUrl(dir)).parseAs<TitleContentDto>()
+        val title = fetchTitle(dir)
         if (!title.hasData) return null
         return title.toSManga(manga, baseUrl)
     }
