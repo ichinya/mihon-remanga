@@ -477,13 +477,21 @@ abstract class ReManga :
     private suspend fun fetchChapters(title: TitleContentDto, dir: String): List<SChapter> {
         val exDomain = if (useExManga && title.id != 0L) exMangaDomain else null
         val exChapters = if (exDomain != null) {
+            // The history endpoint requires an ExManga account; log in with the stored
+            // credentials before requesting it. Without them the chapter list still loads,
+            // paid chapters just stay locked.
+            ensureExToken()
             runCatching {
                 val response = client.get("$exDomain/manga/history?id=${title.id}", exHeaders(), ensureSuccess = false)
                 response.use { response ->
-                    if (response.isSuccessful) {
-                        response.parseAs<ExWrapperDto<List<ExChapterDto>>>().data
-                    } else {
-                        emptyList()
+                    when {
+                        response.code == 401 -> {
+                            Diagnostics.info("exmanga: история требует аккаунт — вход не выполнен")
+                            emptyList()
+                        }
+                        response.isSuccessful ->
+                            response.parseAs<ExWrapperDto<List<ExChapterDto>>>().data
+                        else -> emptyList()
                     }
                 }
             }.getOrElse { emptyList() }
