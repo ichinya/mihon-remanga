@@ -72,10 +72,15 @@ abstract class ReManga :
 
     /**
      * Some ExManga chapters require an account. Logs in with the stored email/password once and
-     * caches the token; returns false when credentials are missing or the login is rejected.
+     * caches the token (tokens expire after ~7 days); returns false when credentials are missing
+     * or the login is rejected. [retryOnAuthFailure] clears a stale token and logs in again.
      */
-    private suspend fun ensureExToken(): Boolean {
-        if (!preferences.getString(EX_TOKEN_PREF, null).isNullOrBlank()) return true
+    private suspend fun ensureExToken(retryOnAuthFailure: Boolean = false): Boolean {
+        if (retryOnAuthFailure) {
+            preferences.edit().remove(EX_TOKEN_PREF).apply()
+        } else if (!preferences.getString(EX_TOKEN_PREF, null).isNullOrBlank()) {
+            return true
+        }
         val email = preferences.getString(EX_EMAIL_PREF, null)?.trim().orEmpty()
         val password = preferences.getString(EX_PASSWORD_PREF, null).orEmpty()
         if (email.isEmpty() || password.isEmpty()) {
@@ -430,8 +435,9 @@ abstract class ReManga :
         val exId = "$exMangaDomain${chapter.url}".toHttpUrlOrNull()?.queryParameter("id")
             ?: return emptyList()
         var response = client.get("$exMangaDomain/chapter?id=$exId", exHeaders(), ensureSuccess = false)
-        // Some chapters are account-gated: log in with the stored credentials and retry once.
-        if (response.code == 401 && ensureExToken()) {
+        // Some chapters are account-gated: log in with the stored credentials and retry once
+        // (also refreshes a cached-but-expired token — it is dropped and re-issued).
+        if (response.code == 401 && ensureExToken(retryOnAuthFailure = !preferences.getString(EX_TOKEN_PREF, null).isNullOrBlank())) {
             response.close()
             response = client.get("$exMangaDomain/chapter?id=$exId", exHeaders(), ensureSuccess = false)
         }
@@ -482,7 +488,12 @@ abstract class ReManga :
             // paid chapters just stay locked.
             ensureExToken()
             runCatching {
-                val response = client.get("$exDomain/manga/history?id=${title.id}", exHeaders(), ensureSuccess = false)
+                var response = client.get("$exDomain/manga/history?id=${title.id}", exHeaders(), ensureSuccess = false)
+                // A cached-but-expired token also yields 401: drop it, log in again, retry once.
+                if (response.code == 401 && !preferences.getString(EX_TOKEN_PREF, null).isNullOrBlank() && ensureExToken(retryOnAuthFailure = true)) {
+                    response.close()
+                    response = client.get("$exDomain/manga/history?id=${title.id}", exHeaders(), ensureSuccess = false)
+                }
                 response.use { response ->
                     when {
                         response.code == 401 -> {
