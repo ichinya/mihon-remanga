@@ -415,8 +415,7 @@ abstract class ReManga :
         }
         val detail = response.use { it.parseAs<ChapterDetailDto>() }
         val serverBase = (detail.server?.link ?: "$baseUrl/").trimEnd('/')
-        // пустые pages у платной главы: 401 перехвачен выше, здесь просто нет контента
-        return detail.pages
+        val pages = detail.pages
             .flatten()
             .sortedBy { it.id }
             .mapIndexed { index, page ->
@@ -424,6 +423,10 @@ abstract class ReManga :
                     ?: (serverBase + "/" + page.link.trimStart('/'))
                 Page(index, imageUrl = link)
             }
+        if (pages.isEmpty()) {
+            throw Exception("Содержимое главы пока недоступно на сервере remanga")
+        }
+        return pages
     }
 
     private suspend fun fetchExPages(chapter: SChapter): List<Page> {
@@ -456,12 +459,24 @@ abstract class ReManga :
             }
             .also { pages ->
                 // ExManga returns named placeholder images when the chapter's content isn't in the
-                // community pool yet — fail with a readable message instead of a 404 storm.
-                if (pages.isNotEmpty() && pages.all { it.imageUrl?.contains("/tachiyomi", ignoreCase = true) == true }) {
+                // community pool yet — remember the chapter so the list can mark it, and fail with
+                // a readable message instead of a 404 storm. The mark clears once real pages arrive.
+                val isPlaceholder = pages.isNotEmpty() &&
+                    pages.all { it.imageUrl?.contains("/tachiyomi", ignoreCase = true) == true }
+                val stored = placeholderIds()
+                if (isPlaceholder) {
+                    if (stored.add(exId)) {
+                        preferences.edit().putStringSet(EX_PLACEHOLDER_PREF, stored).apply()
+                    }
                     throw Exception("Содержимое главы пока не загружено в пул ExManga — зайдите позже")
+                }
+                if (stored.remove(exId)) {
+                    preferences.edit().putStringSet(EX_PLACEHOLDER_PREF, stored).apply()
                 }
             }
     }
+
+    private fun placeholderIds(): MutableSet<String> = preferences.getStringSet(EX_PLACEHOLDER_PREF, emptySet())?.toMutableSet() ?: mutableSetOf()
 
     private suspend fun fetchCatalogList(page: Int, params: HttpUrl.Builder.() -> Unit): MangasPage {
         val dto = client.get(
@@ -511,7 +526,15 @@ abstract class ReManga :
                 if (items.isEmpty()) break
                 chapters += items.mapNotNull { item ->
                     if (item.isLocked && !showLocked) return@mapNotNull null
-                    item.toSChapter(dir, baseUrl, showFreeDate, branch.publisherName(), exDomain, exChapters)
+                    item.toSChapter(
+                        dir,
+                        baseUrl,
+                        showFreeDate,
+                        branch.publisherName(),
+                        exDomain,
+                        exChapters,
+                        placeholderIds(),
+                    )
                 }
                 if (!dto.hasNextPage()) break
                 page++
@@ -551,6 +574,7 @@ abstract class ReManga :
         const val EX_PASSWORD_PREF = "exmanga_password"
         const val EX_TOKEN_PREF = "exmanga_token"
         const val EX_NAME_PREF = "exmanga_name"
+        const val EX_PLACEHOLDER_PREF = "exmanga_placeholders"
     }
 
     override fun imageRequest(page: Page): Request {

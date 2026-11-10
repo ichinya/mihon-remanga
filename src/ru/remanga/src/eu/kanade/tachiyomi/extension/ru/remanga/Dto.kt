@@ -165,13 +165,16 @@ class ChapterItemDto(
         branchPublisher: String?,
         exDomain: String?,
         exChapters: List<ExChapterDto>,
+        exPlaceholders: Set<String>,
     ): SChapter = SChapter.create().apply {
         // A paid chapter with the same chapter on ExManga is readable there; a paid chapter
-        // without one stays locked (remanga only, requires purchase).
+        // without one stays locked (remanga only, requires purchase). A matched chapter whose
+        // pool content is still a placeholder is marked ⏳ — it may load later.
         val exMatch = exDomain?.let {
             exChapters.firstOrNull { ex -> ex.id == id || (ex.tome == tome && ex.chapter == chapter) }
         }
-        val readableViaEx = exMatch != null
+        val matchedViaEx = exMatch != null
+        val readableViaEx = matchedViaEx && exMatch.id.toString() !in exPlaceholders
 
         val chapterTitle = buildString {
             if (tome != null) {
@@ -183,14 +186,14 @@ class ChapterItemDto(
                 formatFreeDate(pubDate)?.let { append(" (free ").append(it).append(")") }
             }
         }
-        name = if (isLocked && !readableViaEx) "$NO_EX_ICON$chapterTitle" else chapterTitle
+        name = if (isLocked && !matchedViaEx) "$NO_EX_ICON$chapterTitle" else chapterTitle
         chapter_number = chapter?.toFloatOrNull() ?: 0f
-        scanlator = if (readableViaEx) {
+        scanlator = if (matchedViaEx) {
             "exmanga"
         } else {
             publishers.firstOrNull()?.name ?: branchPublisher
         }
-        url = if (readableViaEx) {
+        url = if (matchedViaEx) {
             "/chapter?id=${exMatch!!.id}"
         } else {
             "$baseUrl/titles/".toHttpUrl()
