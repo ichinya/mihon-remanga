@@ -15,7 +15,6 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.Jsoup
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -160,6 +159,7 @@ class ChapterItemDto(
 
     fun toSChapter(
         dir: String,
+        titleId: Long,
         baseUrl: String,
         showFreeDate: Boolean,
         branchPublisher: String?,
@@ -196,12 +196,9 @@ class ChapterItemDto(
         url = if (matchedViaEx) {
             "/chapter?id=${exMatch!!.id}"
         } else {
-            "$baseUrl/titles/".toHttpUrl()
-                .newBuilder()
-                .addPathSegment(dir)
-                .addQueryParameter("chapter", id.toString())
-                .build()
-                .let { it.encodedPath + it.encodedQuery?.let { q -> "?$q" }.orEmpty() }
+            // Old-extension url format /manga/{titleId}ch{chapterId} — keeps pre-migration
+            // downloads matched to the chapter list. Numeric id resolves in v2 chapter detail.
+            "/manga/${titleId}ch$id"
         }
         date_upload = parseChapterDate(uploadDate)
     }

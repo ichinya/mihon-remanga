@@ -402,8 +402,12 @@ abstract class ReManga :
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         Diagnostics.ctxChapter = chapter.name
         if (chapter.scanlator == "exmanga") return fetchExPages(chapter)
-        val chapterId = "$baseUrl${chapter.url}".toHttpUrlOrNull()?.queryParameter("chapter")
-            ?: return emptyList()
+        // url formats: "/manga/{titleId}ch{chapterId}" (ours + old extension) or "/titles/{dir}?chapter={id}"
+        val chapterId = if ("?" in chapter.url) {
+            "$baseUrl${chapter.url}".toHttpUrlOrNull()?.queryParameter("chapter")
+        } else {
+            chapterChapterId(chapter.url)
+        } ?: return emptyList()
         val response = client.get(chapterApiUrl(chapterId), ensureSuccess = false)
         if (!response.isSuccessful) {
             val code = response.code
@@ -528,6 +532,7 @@ abstract class ReManga :
                     if (item.isLocked && !showLocked) return@mapNotNull null
                     item.toSChapter(
                         dir,
+                        title.id,
                         baseUrl,
                         showFreeDate,
                         branch.publisherName(),
@@ -541,6 +546,12 @@ abstract class ReManga :
             }
         }
         return chapters
+    }
+
+    /** Extracts the trailing chapter id from "/manga/{titleId}ch{chapterId}". */
+    private fun chapterChapterId(url: String): String? {
+        val m = Regex("ch(\\d+)$").find(url) ?: return null
+        return m.groupValues[1]
     }
 
     private fun titleApiUrl(dir: String): HttpUrl = "$API_URL/v2/titles/".toHttpUrl().newBuilder().addPathSegment(dir).build()
