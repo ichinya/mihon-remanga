@@ -29,6 +29,21 @@ class CatalogDto(
     fun hasNextPage(): Boolean = hasNext(next)
 }
 
+// The text-search endpoint /api/v2/search/ has no `next` — pagination lives in meta.
+@Serializable
+class SearchDto(
+    val meta: SearchMetaDto? = null,
+    val results: List<CatalogItemDto> = emptyList(),
+) {
+    fun hasNextPage(): Boolean = (meta?.page ?: 0) in 1 until (meta?.totalPages ?: 0)
+}
+
+@Serializable
+class SearchMetaDto(
+    val page: Int = 1,
+    @SerialName("total_pages") val totalPages: Int = 0,
+)
+
 internal fun hasNext(next: JsonPrimitive?): Boolean {
     next ?: return false
     next.longOrNull?.let { return it > 0 }

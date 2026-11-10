@@ -344,16 +344,18 @@ abstract class ReManga :
         page: Int,
         query: String,
         filters: FilterList,
-    ): MangasPage = fetchCatalogList(page) {
+    ): MangasPage {
         val trimmed = query.trim()
-        if (trimmed.isNotEmpty()) addQueryParameter("query", trimmed)
-
-        filters.firstInstanceOrNull<SortFilter>()?.selected?.takeIf { it.isNotEmpty() }
-            ?.let { addQueryParameter("ordering", it) }
-        filters.firstInstanceOrNull<TypeFilter>()?.selected?.takeIf { it.isNotEmpty() }
-            ?.let { addQueryParameter("type", it) }
-        filters.firstInstanceOrNull<AgeRatingFilter>()?.selected?.takeIf { it.isNotEmpty() }
-            ?.let { addQueryParameter("age_limit", it) }
+        // The v2 catalog ignores `query` — text search lives on its own endpoint and ignores filters.
+        if (trimmed.isNotEmpty()) return fetchSearchList(page, trimmed)
+        return fetchCatalogList(page) {
+            filters.firstInstanceOrNull<SortFilter>()?.selected?.takeIf { it.isNotEmpty() }
+                ?.let { addQueryParameter("ordering", it) }
+            filters.firstInstanceOrNull<TypeFilter>()?.selected?.takeIf { it.isNotEmpty() }
+                ?.let { addQueryParameter("type", it) }
+            filters.firstInstanceOrNull<AgeRatingFilter>()?.selected?.takeIf { it.isNotEmpty() }
+                ?.let { addQueryParameter("age_limit", it) }
+        }
     }
 
     override fun getFilterList(data: JsonElement?): FilterList = filterList()
@@ -490,6 +492,18 @@ abstract class ReManga :
                 .apply(params)
                 .build(),
         ).parseAs<CatalogDto>()
+        val mangas = dto.results.mapNotNull { it.toSManga(baseUrl) }
+        return MangasPage(mangas, dto.hasNextPage())
+    }
+
+    private suspend fun fetchSearchList(page: Int, query: String): MangasPage {
+        val dto = client.get(
+            "$API_URL/v2/search/".toHttpUrl().newBuilder()
+                .addQueryParameter("query", query)
+                .addQueryParameter("page", page.toString())
+                .addQueryParameter("count", PAGE_SIZE.toString())
+                .build(),
+        ).parseAs<SearchDto>()
         val mangas = dto.results.mapNotNull { it.toSManga(baseUrl) }
         return MangasPage(mangas, dto.hasNextPage())
     }
