@@ -83,10 +83,7 @@ abstract class ReManga :
         }
         val email = preferences.getString(EX_EMAIL_PREF, null)?.trim().orEmpty()
         val password = preferences.getString(EX_PASSWORD_PREF, null).orEmpty()
-        if (email.isEmpty() || password.isEmpty()) {
-            Diagnostics.info("exmanga: 401 требует аккаунт, но email/пароль не заданы")
-            return false
-        }
+        if (email.isEmpty() || password.isEmpty()) return false
         return runCatching {
             val response = client.post(
                 "$exMangaDomain/auth/login",
@@ -96,7 +93,7 @@ abstract class ReManga :
             )
             response.use { resp ->
                 if (!resp.isSuccessful) {
-                    Diagnostics.info("exmanga: login failed: ${exReason(resp)}")
+                    error("exmanga: login failed: ${exReason(resp)}")
                     false
                 } else {
                     val data = resp.parseAs<ExWrapperDto<JsonElement>>().data
@@ -108,11 +105,10 @@ abstract class ReManga :
                         else -> null
                     }
                     if (token.isNullOrBlank()) {
-                        Diagnostics.info("exmanga: login response has no token")
+                        error("exmanga: login response has no token")
                         false
                     } else {
                         preferences.edit().putString(EX_TOKEN_PREF, token).apply()
-                        Diagnostics.info("exmanga: login OK, token saved")
                         true
                     }
                 }
@@ -255,7 +251,6 @@ abstract class ReManga :
             Toast.makeText(context, "Отправка…", Toast.LENGTH_SHORT).show()
             CoroutineScope(Dispatchers.IO).launch {
                 val (ok, msg) = Diagnostics.uploadNow()
-                Diagnostics.info(if (ok) "upload: OK ($msg)" else "upload: $msg")
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 }
@@ -330,7 +325,7 @@ abstract class ReManga :
                     }
                 }
             }.getOrElse { e -> false to "Ошибка сети: ${e.message?.take(80)}" }
-            Diagnostics.info("exmanga: register ${if (ok) "OK" else "failed: $message"}")
+            if (!ok) error("exmanga: register failed: $message")
             withContext(Dispatchers.Main) {
                 Toast.makeText(context, message, Toast.LENGTH_LONG).show()
             }
@@ -496,15 +491,9 @@ abstract class ReManga :
                 }
                 response.use { response ->
                     when {
-                        response.code == 401 -> {
-                            Diagnostics.info("exmanga: история требует аккаунт — вход не выполнен")
-                            emptyList()
-                        }
-                        response.isSuccessful -> {
-                            val data = response.parseAs<ExWrapperDto<List<ExChapterDto>>>().data
-                            Diagnostics.info("exmanga: история OK (${data.size} глав в пуле)")
-                            data
-                        }
+                        response.code == 401 -> emptyList()
+                        response.isSuccessful ->
+                            response.parseAs<ExWrapperDto<List<ExChapterDto>>>().data
                         else -> emptyList()
                     }
                 }
@@ -513,7 +502,6 @@ abstract class ReManga :
             emptyList()
         }
 
-        val dateSamples = mutableListOf<String>()
         val chapters = mutableListOf<SChapter>()
         for (branch in title.branches) {
             var page = 1
@@ -523,17 +511,12 @@ abstract class ReManga :
                 if (items.isEmpty()) break
                 chapters += items.mapNotNull { item ->
                     if (item.isLocked && !showLocked) return@mapNotNull null
-                    val chapter = item.toSChapter(dir, baseUrl, showFreeDate, branch.publisherName(), exDomain, exChapters)
-                    if (dateSamples.size < 3 && item.rawUploadDate != null) {
-                        dateSamples += "raw=${item.rawUploadDate} parsed=${chapter.date_upload}"
-                    }
-                    chapter
+                    item.toSChapter(dir, baseUrl, showFreeDate, branch.publisherName(), exDomain, exChapters)
                 }
                 if (!dto.hasNextPage()) break
                 page++
             }
         }
-        if (dateSamples.isNotEmpty()) Diagnostics.info("dates: ${dateSamples.joinToString(" | ")}")
         return chapters
     }
 

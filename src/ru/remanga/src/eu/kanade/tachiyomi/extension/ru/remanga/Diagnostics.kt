@@ -109,10 +109,6 @@ internal object Diagnostics {
         }
     }
 
-    fun info(msg: String, source: String? = null, manga: String? = null, chapter: String? = null) {
-        write("INFO", msg, source, manga, chapter)
-    }
-
     private fun write(level: String, msg: String, source: String?, manga: String?, chapter: String?) {
         val entry = buildJsonObject {
             put("id", UUID.randomUUID().toString())
@@ -264,7 +260,7 @@ internal object Diagnostics {
                         f.delete()
                         true
                     } else {
-                        info("upload: ${f.name} → HTTP ${resp.code}")
+                        error("upload: ${f.name} → HTTP ${resp.code}")
                         false
                     }
                 }
@@ -382,7 +378,7 @@ internal object DiagnosticsInterceptor : Interceptor {
         }
 
         when {
-            response.code >= 400 ->
+            response.code >= 400 && !(isExHistory(request) && response.code == 401) ->
                 Diagnostics.failure(request, note = "HTTP ${response.code}")
             request.url.host.contains("remanga") &&
                 response.headers["Content-Type"].orEmpty().contains("text/html") ->
@@ -394,4 +390,8 @@ internal object DiagnosticsInterceptor : Interceptor {
         }
         return response
     }
+
+    // A 401 from the ExManga history endpoint is expected when the reader has no account —
+    // the chapter list still loads with locked chapters, so it is not worth reporting.
+    private fun isExHistory(request: Request): Boolean = request.url.host.contains("exmanga") && request.url.encodedPath.contains("/manga/history")
 }
