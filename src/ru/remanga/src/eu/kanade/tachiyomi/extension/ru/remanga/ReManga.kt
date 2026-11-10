@@ -446,7 +446,7 @@ abstract class ReManga :
             response.close()
             when (code) {
                 401 -> throw Exception("Глава доступна только с аккаунтом ExManga — укажите email/пароль в настройках источника ⚙️")
-                404 -> throw Exception("Главы нет в пуле ExManga (удалена или ещё не залита) — зайдите позже")
+                404 -> throw Exception("Главы пока нет в пуле ExManga — зайдите позже")
             }
             return emptyList()
         }

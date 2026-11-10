@@ -294,5 +294,5 @@ private fun formatFreeDate(raw: String?): String? {
 
 private val displayDateFormat = DateTimeFormatter.ofPattern("dd.MM.yyyy")
 
-// ⛔ marks paid chapters that are NOT on ExManga either — they can't be read without a purchase.
-private const val NO_EX_ICON = "\u26D4 "
+// ⏳ marks paid chapters not yet uploaded to the ExManga pool — they may appear there later.
+private const val NO_EX_ICON = "\u23F3 "
