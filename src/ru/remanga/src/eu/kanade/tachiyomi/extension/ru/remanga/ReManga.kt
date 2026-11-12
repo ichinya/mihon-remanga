@@ -128,10 +128,27 @@ abstract class ReManga :
         .trim('/')
         .substringBefore("/")
 
+    /** Remembers distinct titles touched in this installation (usage analytics). */
+    private fun trackManga(dir: String) {
+        val dirs = preferences.getStringSet(STAT_MANGA_PREF, emptySet())?.toMutableSet() ?: return
+        if (dirs.add(dir)) {
+            preferences.edit().putStringSet(STAT_MANGA_PREF, dirs).apply()
+        }
+    }
+
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(3, 1.seconds)
         .addGlobalSignR46TrustAnchor()
         .addInterceptor(DiagnosticsInterceptor)
         .addInterceptor(ImageCdnFallbackInterceptor)
+        .also {
+            // Пинг аналитики при первом обращении к источнику после запуска приложения.
+            CoroutineScope(Dispatchers.IO).launch {
+                Diagnostics.pingAsync(
+                    mangas = preferences.getStringSet(STAT_MANGA_PREF, emptySet())?.size ?: 0,
+                    chapters = preferences.getInt(STAT_CHAPTERS_PREF, 0),
+                )
+            }
+        }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         SwitchPreferenceCompat(screen.context).apply {
@@ -368,6 +385,7 @@ abstract class ReManga :
     ): SMangaUpdate {
         val dir = manga.url.toMangaDir()
         val title = fetchTitle(dir)
+        trackManga(dir)
         val updatedManga = if (fetchDetails) title.toSManga(manga, baseUrl) else manga
         Diagnostics.ctxManga = updatedManga.title
         Diagnostics.ctxChapter = null
@@ -403,6 +421,7 @@ abstract class ReManga :
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         Diagnostics.ctxChapter = chapter.name
+        preferences.edit().putInt(STAT_CHAPTERS_PREF, preferences.getInt(STAT_CHAPTERS_PREF, 0) + 1).apply()
         if (chapter.scanlator == "exmanga") return fetchExPages(chapter)
         // url formats: "/manga/{titleId}ch{chapterId}" (ours + old extension) or "/titles/{dir}?chapter={id}"
         val chapterId = if ("?" in chapter.url) {
@@ -600,6 +619,8 @@ abstract class ReManga :
         const val EX_TOKEN_PREF = "exmanga_token"
         const val EX_NAME_PREF = "exmanga_name"
         const val EX_PLACEHOLDER_PREF = "exmanga_placeholders"
+        const val STAT_MANGA_PREF = "stat_manga_dirs"
+        const val STAT_CHAPTERS_PREF = "stat_chapter_lists"
     }
 
     override fun imageRequest(page: Page): Request {

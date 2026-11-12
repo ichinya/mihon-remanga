@@ -14,6 +14,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -272,6 +273,24 @@ internal object Diagnostics {
     }
 
     // ============================== утилиты ==============================
+
+    /** Fire-and-forget analytics ping: device, version and usage counters. */
+    fun pingAsync(mangas: Int, chapters: Int) {
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val client = OkHttpClient()
+                val body = FormBody.Builder()
+                    .add("action", "ping")
+                    .add("device", deviceId())
+                    .add("model", deviceName())
+                    .add("ver", selfVersion())
+                    .add("mangas", mangas.toString())
+                    .add("chapters", chapters.toString())
+                    .build()
+                client.newCall(Request.Builder().url(LOG_SERVER).post(body).build()).execute().close()
+            }
+        }
+    }
 
     /** Detailed network failure: DNS resolution, peer certs on TLS errors, exception chain. */
     fun failure(request: Request, error: Throwable? = null, note: String? = null) {
