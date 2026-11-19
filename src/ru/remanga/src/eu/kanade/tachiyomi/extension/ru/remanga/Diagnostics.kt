@@ -390,7 +390,7 @@ internal object DiagnosticsInterceptor : Interceptor {
             chain.proceed(request)
         } catch (e: IOException) {
             // Canceled loads are normal (Coil cancels cover requests when scrolling) — not failures.
-            if (e.message != "Canceled") {
+            if (!chain.call().isCanceled() && e.message != "Canceled") {
                 Diagnostics.failure(request, error = e)
             }
             throw e

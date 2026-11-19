@@ -140,6 +140,7 @@ abstract class ReManga :
         .addGlobalSignR46TrustAnchor()
         .addInterceptor(DiagnosticsInterceptor)
         .addInterceptor(ImageCdnFallbackInterceptor)
+        .addInterceptor(HostBackoffInterceptor())
         .also {
             // Пинг аналитики при первом обращении к источнику после запуска приложения.
             CoroutineScope(Dispatchers.IO).launch {
