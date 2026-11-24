@@ -242,7 +242,7 @@ class ExRegisterDto(
 
 @Serializable
 class ExAuthResponseDto(
-    val success: Boolean = false,
+    val success: Boolean? = null,
     val data: JsonElement? = null,
 )
 

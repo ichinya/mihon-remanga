@@ -7,6 +7,7 @@ import androidx.preference.EditTextPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
+import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -15,6 +16,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.DEFAULT_CACHE_CONTROL
 import keiyoushi.network.get
 import keiyoushi.network.post
 import keiyoushi.network.rateLimit
@@ -23,15 +25,18 @@ import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -39,6 +44,7 @@ import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import java.io.IOException
 import kotlin.time.Duration.Companion.seconds
 
 @Source
@@ -70,50 +76,63 @@ abstract class ReManga :
         }
         .build()
 
+    private sealed interface ExLogin {
+        data object Cached : ExLogin
+        data object Authenticated : ExLogin
+        class Failed(val reason: String) : ExLogin
+    }
+
     /**
      * Some ExManga chapters require an account. Logs in with the stored email/password once and
-     * caches the token (tokens expire after ~7 days); returns false when credentials are missing
-     * or the login is rejected. [retryOnAuthFailure] clears a stale token and logs in again.
+     * caches the token. [retryOnAuthFailure] clears a rejected token and logs in again.
      */
-    private suspend fun ensureExToken(retryOnAuthFailure: Boolean = false): Boolean {
+    private suspend fun ensureExToken(retryOnAuthFailure: Boolean = false, authRequest: ExChapterAuthRequest? = null): ExLogin {
         if (retryOnAuthFailure) {
             preferences.edit().remove(EX_TOKEN_PREF).apply()
         } else if (!preferences.getString(EX_TOKEN_PREF, null).isNullOrBlank()) {
-            return true
+            return ExLogin.Cached
         }
         val email = preferences.getString(EX_EMAIL_PREF, null)?.trim().orEmpty()
         val password = preferences.getString(EX_PASSWORD_PREF, null).orEmpty()
-        if (email.isEmpty() || password.isEmpty()) return false
-        return runCatching {
-            val response = client.post(
-                "$exMangaDomain/auth/login",
-                exHeaders(),
-                ExLoginDto(email, password).toJsonRequestBody(),
-                ensureSuccess = false,
-            )
-            response.use { resp ->
-                if (!resp.isSuccessful) {
-                    error("exmanga: login failed: ${exReason(resp)}")
-                    false
-                } else {
-                    val data = resp.parseAs<ExWrapperDto<JsonElement>>().data
-                    val token = when (data) {
-                        is JsonPrimitive -> data.content
-                        is JsonObject ->
-                            (data["token"] ?: data["accessToken"] ?: data["access_token"] ?: data["jwt"])
-                                ?.jsonPrimitive?.contentOrNull
-                        else -> null
-                    }
-                    if (token.isNullOrBlank()) {
-                        error("exmanga: login response has no token")
-                        false
-                    } else {
-                        preferences.edit().putString(EX_TOKEN_PREF, token).apply()
-                        true
-                    }
+        if (email.isEmpty() || password.isEmpty()) {
+            val missing = listOfNotNull("email".takeIf { email.isEmpty() }, "пароль".takeIf { password.isEmpty() })
+            return ExLogin.Failed("Вход пропущен: заполните ${missing.joinToString(" и ")} в настройках источника.")
+        }
+        return try {
+            val request = Request.Builder().url("$exMangaDomain/auth/login").headers(exHeaders())
+                .post(ExLoginDto(email, password).toJsonRequestBody())
+                .tag(ExChapterAuthRequest::class.java, authRequest)
+                .build()
+            client.newCall(request).await().use { resp ->
+                val status = "POST /auth/login → ${resp.authStatus()}"
+                if (!resp.isSuccessful) return ExLogin.Failed(status)
+                val body = try {
+                    resp.parseAs<ExAuthResponseDto>()
+                } catch (_: SerializationException) {
+                    return ExLogin.Failed("$status, ответ не соответствует формату входа.")
                 }
+                if (body.success == false) {
+                    val reason = authErrorCode(body.data) ?: "success=false"
+                    return ExLogin.Failed("$status, сервер отклонил вход ($reason).")
+                }
+                val value = when (val data = body.data) {
+                    is JsonObject -> data["token"] ?: data["accessToken"] ?: data["access_token"] ?: data["jwt"]
+                    else -> data
+                }
+                val token = (value as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+                if (token.isNullOrBlank()) return ExLogin.Failed("$status, в ответе нет токена.")
+                preferences.edit().putString(EX_TOKEN_PREF, token).apply()
+                ExLogin.Authenticated
             }
-        }.getOrDefault(false)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IOException) {
+            currentCoroutineContext().ensureActive()
+            if (e.message == "Canceled") throw e
+            ExLogin.Failed("POST /auth/login: ${e.javaClass.simpleName}.")
+        } catch (_: IllegalArgumentException) {
+            ExLogin.Failed("Не удалось сформировать запрос входа в ExManga.")
+        }
     }
 
     /** Extracts the human-readable reason from an ExManga error body ("data" field), if present. */
@@ -142,6 +161,7 @@ abstract class ReManga :
         .addInterceptor(ImageCdnFallbackInterceptor)
         .addInterceptor(HostBackoffInterceptor())
         .also {
+            Diagnostics.autoUploadEnabled = preferences.getBoolean(AUTO_UPLOAD_PREF, false)
             // Пинг аналитики при первом обращении к источнику после запуска приложения.
             CoroutineScope(Dispatchers.IO).launch {
                 Diagnostics.pingAsync(
@@ -219,10 +239,7 @@ abstract class ReManga :
                 Diagnostics.autoUploadEnabled = newValue as Boolean
                 true
             }
-        }.also {
-            Diagnostics.autoUploadEnabled = preferences.getBoolean(AUTO_UPLOAD_PREF, false)
-            screen.addPreference(it)
-        }
+        }.also(screen::addPreference)
 
         addDiagnosticsPreferences(screen)
     }
@@ -334,7 +351,7 @@ abstract class ReManga :
                     } else {
                         val body = resp.parseAs<ExAuthResponseDto>()
                         val token = (body.data as? JsonPrimitive)?.content
-                        if (body.success && !token.isNullOrBlank()) {
+                        if (body.success == true && !token.isNullOrBlank()) {
                             preferences.edit().putString(EX_TOKEN_PREF, token).apply()
                             true to "Аккаунт создан, вход выполнен"
                         } else {
@@ -458,18 +475,12 @@ abstract class ReManga :
     private suspend fun fetchExPages(chapter: SChapter): List<Page> {
         val exId = "$exMangaDomain${chapter.url}".toHttpUrlOrNull()?.queryParameter("id")
             ?: return emptyList()
-        var response = client.get("$exMangaDomain/chapter?id=$exId", exHeaders(), ensureSuccess = false)
-        // Some chapters are account-gated: log in with the stored credentials and retry once
-        // (also refreshes a cached-but-expired token — it is dropped and re-issued).
-        if (response.code == 401 && ensureExToken(retryOnAuthFailure = !preferences.getString(EX_TOKEN_PREF, null).isNullOrBlank())) {
-            response.close()
-            response = client.get("$exMangaDomain/chapter?id=$exId", exHeaders(), ensureSuccess = false)
-        }
+        val url = "$exMangaDomain/chapter".toHttpUrl().newBuilder().addQueryParameter("id", exId).build()
+        val response = requestExChapter(url, chapter.name)
         if (!response.isSuccessful) {
             val code = response.code
             response.close()
             when (code) {
-                401 -> throw Exception("Глава доступна только с аккаунтом ExManga — укажите email/пароль в настройках источника ⚙️")
                 404 -> throw Exception("Главы пока нет в пуле ExManga — зайдите позже")
             }
             return emptyList()
@@ -500,6 +511,78 @@ abstract class ReManga :
                     preferences.edit().putStringSet(EX_PLACEHOLDER_PREF, stored).apply()
                 }
             }
+    }
+
+    private suspend fun requestExChapter(url: HttpUrl, chapter: String): Response {
+        val manga = Diagnostics.ctxManga.orEmpty()
+        fun request(step: ExChapterAuthRequest) = Request.Builder().url(url).headers(exHeaders())
+            .cacheControl(DEFAULT_CACHE_CONTROL)
+            .tag(ExChapterAuthRequest::class.java, step)
+            .build()
+
+        val first = client.newCall(request(ExChapterAuthRequest.INITIAL)).await()
+        if (first.code != 401) return first
+        val rejectedAuth = first.request.header("Authorization")
+        val firstStatus = first.use { it.authStatus() }
+        val tokenState = if (rejectedAuth == null) "без токена" else "с токеном"
+        fun report(reason: String) {
+            Diagnostics.error("GET /chapter $tokenState → $firstStatus. $reason", "exmanga", manga, chapter)
+        }
+        val accountRequired = "Глава доступна только с аккаунтом ExManga — укажите email/пароль в настройках источника ⚙️"
+        val refresh = rejectedAuth != null && rejectedAuth == exHeaders()["Authorization"]
+        val loginStep = when (val login = ensureExToken(refresh, ExChapterAuthRequest.RECOVERY)) {
+            ExLogin.Cached -> "Использован сохранённый токен."
+            ExLogin.Authenticated -> "Вход выполнен, получен токен."
+            is ExLogin.Failed -> {
+                report(login.reason)
+                throw Exception(accountRequired)
+            }
+        }
+
+        val retry = request(ExChapterAuthRequest.RECOVERY)
+        val retryStep = "$loginStep Повтор GET /chapter"
+        val response = try {
+            client.newCall(retry).await()
+        } catch (e: IOException) {
+            currentCoroutineContext().ensureActive()
+            if (e.message != "Canceled") report("$retryStep: ${e.javaClass.simpleName}.")
+            throw e
+        }
+        if (!response.isSuccessful) {
+            val retryToken = if (response.request.header("Authorization") == null) "без токена" else "с токеном"
+            report("$retryStep $retryToken → ${response.authStatus()}.")
+        }
+        if (response.code == 401) {
+            response.close()
+            throw Exception(accountRequired)
+        }
+        return response
+    }
+
+    private fun Response.authStatus(): String {
+        if (isSuccessful) return "HTTP $code"
+        val bearer = challenges().firstOrNull { it.scheme.equals("Bearer", ignoreCase = true) }?.authParams?.get("error")
+        val reason = authErrorCode(bearer?.let(::JsonPrimitive)) ?: if (body.contentType()?.subtype?.endsWith("json") == true) {
+            runCatching { peekBody(4096).use { authErrorCode(it.string().parseAs<JsonObject>()) } }.getOrNull()
+        } else {
+            null
+        }
+        return if (reason == null) "HTTP $code" else "HTTP $code ($reason)"
+    }
+
+    // A server message can echo the reader's credentials. Only emit known categories.
+    private fun authErrorCode(data: JsonElement?): String? {
+        val values = if (data is JsonObject) listOf(data["error"], data["code"], data["data"], data["message"]) else listOf(data)
+        return values.firstNotNullOfOrNull { value ->
+            when ((value as? JsonPrimitive)?.contentOrNull?.trim()?.lowercase()) {
+                "invalid_token", "invalid token" -> "invalid_token"
+                "token_expired", "token expired" -> "token_expired"
+                "insufficient_scope" -> "insufficient_scope"
+                "invalid_request" -> "invalid_request"
+                "invalid_credentials", "invalid credentials", "неверный логин или пароль" -> "invalid_credentials"
+                else -> null
+            }
+        }
     }
 
     private fun placeholderIds(): MutableSet<String> = preferences.getStringSet(EX_PLACEHOLDER_PREF, emptySet())?.toMutableSet() ?: mutableSetOf()
@@ -538,7 +621,7 @@ abstract class ReManga :
             runCatching {
                 var response = client.get("$exDomain/manga/history?id=${title.id}", exHeaders(), ensureSuccess = false)
                 // A cached-but-expired token also yields 401: drop it, log in again, retry once.
-                if (response.code == 401 && !preferences.getString(EX_TOKEN_PREF, null).isNullOrBlank() && ensureExToken(retryOnAuthFailure = true)) {
+                if (response.code == 401 && !preferences.getString(EX_TOKEN_PREF, null).isNullOrBlank() && ensureExToken(retryOnAuthFailure = true) !is ExLogin.Failed) {
                     response.close()
                     response = client.get("$exDomain/manga/history?id=${title.id}", exHeaders(), ensureSuccess = false)
                 }

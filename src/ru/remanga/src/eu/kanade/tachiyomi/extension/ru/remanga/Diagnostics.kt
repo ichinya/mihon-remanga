@@ -373,6 +373,8 @@ internal object Diagnostics {
     }.getOrNull()
 }
 
+internal enum class ExChapterAuthRequest { INITIAL, RECOVERY }
+
 /**
  * Outermost source interceptor: records the outcome the user actually sees, after the
  * image-CDN fallback has retried. Never alters requests, responses or errors.
@@ -381,11 +383,9 @@ internal object DiagnosticsInterceptor : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val source = when {
-            request.url.host.contains("exmanga") -> "exmanga"
-            request.url.host.contains("remanga") -> "remanga"
-            else -> Diagnostics.ctxSource
-        }
+        val authRequest = request.tag(ExChapterAuthRequest::class.java)
+        // The chapter loader reports the whole recovery attempt once it knows the outcome.
+        if (authRequest == ExChapterAuthRequest.RECOVERY) return chain.proceed(request)
         val response = try {
             chain.proceed(request)
         } catch (e: IOException) {
@@ -396,8 +396,9 @@ internal object DiagnosticsInterceptor : Interceptor {
             throw e
         }
 
+        if (response.code == 401 && (authRequest == ExChapterAuthRequest.INITIAL || isExHistory(request))) return response
         when {
-            response.code >= 400 && !(isExHistory(request) && response.code == 401) ->
+            response.code >= 400 ->
                 Diagnostics.failure(request, note = "HTTP ${response.code}")
             request.url.host.contains("remanga") &&
                 response.headers["Content-Type"].orEmpty().contains("text/html") ->
