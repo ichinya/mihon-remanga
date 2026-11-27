@@ -53,7 +53,8 @@ internal fun hasNext(next: JsonPrimitive?): Boolean {
 
 @Serializable
 class CatalogItemDto(
-    private val dir: String,
+    val dir: String,
+    val id: Long? = null,
     @SerialName("main_name") private val mainName: String? = null,
     @SerialName("secondary_name") private val secondaryName: String? = null,
     private val cover: CoverDto? = null,

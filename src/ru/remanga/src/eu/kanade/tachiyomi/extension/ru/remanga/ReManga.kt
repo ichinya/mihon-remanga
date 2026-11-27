@@ -155,11 +155,50 @@ abstract class ReManga :
         (data as? JsonPrimitive)?.content ?: "HTTP ${resp.code}"
     }.getOrDefault("HTTP ${resp.code}")
 
-    /** Library entries migrated from the old extension store "/api/titles/{id-or-dir}/" — extract the key. */
-    private fun String.toMangaDir(): String = substringAfterLast("/titles/", this)
-        .substringBefore("?")
-        .trim('/')
-        .substringBefore("/")
+    private fun HttpUrl.titleDir(storedKey: Boolean = false): String? {
+        val parts = pathSegments
+        val dir = when {
+            parts.first() == "manga" || parts.first() == "titles" -> parts.getOrNull(1)
+            parts.take(2) == listOf("api", "titles") -> parts.getOrNull(2)
+            parts.take(3) == listOf("api", "v2", "titles") -> parts.getOrNull(3)
+            storedKey && parts.drop(1).all { it.isEmpty() } -> parts.first()
+            else -> null
+        }
+        return dir?.takeIf { it.isNotBlank() && '/' !in it }
+    }
+
+    private fun SManga.storedUrl(): HttpUrl = baseUrl.toHttpUrl().resolve(url)
+        ?: throw IllegalArgumentException("Не удалось прочитать адрес тайтла ReManga.")
+
+    // Bare catalogue keys are slugs, even when they look numeric.
+    private fun HttpUrl.legacyId(dir: String): Long? = if (pathSegments.take(2) == listOf("api", "titles")) dir.toLongOrNull() else null
+
+    private fun knownDir(id: Long): String? = preferences.getString("legacy_title_dir_$id", null)
+
+    private suspend fun resolveLegacyTitle(id: Long, name: String): Pair<String, TitleContentDto> {
+        val prefKey = "legacy_title_dir_$id"
+        knownDir(id)?.let { dir ->
+            val title = findTitle(dir)
+            if (title?.id == id) return dir to title
+            preferences.edit().remove(prefKey).apply()
+        }
+        if (name.isNotBlank()) {
+            var page = 1
+            do {
+                val results = searchTitles(page, name)
+                val match = results.results.firstOrNull { it.id == id && it.dir.isNotBlank() }
+                if (match != null) {
+                    val title = findTitle(match.dir)
+                    if (title?.id == id) {
+                        preferences.edit().putString(prefKey, match.dir).apply()
+                        return match.dir to title
+                    }
+                }
+                page++
+            } while (results.results.isNotEmpty() && page <= (results.meta?.totalPages ?: 0))
+        }
+        throw Exception("Не удалось найти тайтл с прежним ID $id. Откройте поиск по названию через WebView.")
+    }
 
     /** Remembers distinct titles touched in this installation (usage analytics). */
     private fun trackManga(dir: String) {
@@ -416,8 +455,9 @@ abstract class ReManga :
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val dir = manga.url.toMangaDir()
-        val title = fetchTitle(dir)
+        val storedUrl = manga.storedUrl()
+        val key = requireNotNull(storedUrl.titleDir(storedKey = true)) { "Не удалось прочитать адрес тайтла ReManga." }
+        val (dir, title) = storedUrl.legacyId(key)?.let { resolveLegacyTitle(it, manga.title) } ?: (key to fetchTitle(key))
         trackManga(dir)
         val updatedManga = if (fetchDetails) title.toSManga(manga, baseUrl) else manga
         Diagnostics.ctxManga = updatedManga.title
@@ -426,31 +466,37 @@ abstract class ReManga :
         return SMangaUpdate(updatedManga, updatedChapters)
     }
 
-    private suspend fun fetchTitle(dir: String): TitleContentDto {
-        val response = client.get(titleApiUrl(dir), ensureSuccess = false)
-        if (!response.isSuccessful) {
-            val code = response.code
-            response.close()
-            if (code == 404) {
-                throw Exception("ReManga не нашла тайтл по сохранённому адресу. Поищите его по названию. Если найдёте новую карточку, перенесите прогресс через миграцию в Mihon.")
-            }
-            throw Exception("Ошибка загрузки тайтла: HTTP $code")
+    private suspend fun fetchTitle(dir: String): TitleContentDto = findTitle(dir)
+        ?: throw Exception("ReManga не нашла тайтл по сохранённому адресу. Поищите его по названию. Если найдёте новую карточку, перенесите прогресс через миграцию в Mihon.")
+
+    private suspend fun findTitle(dir: String): TitleContentDto? = client.get(titleApiUrl(dir), ensureSuccess = false).use { response ->
+        when {
+            response.code == 404 -> null
+            response.isSuccessful -> response.parseAs<TitleContentDto>()
+            else -> throw Exception("Ошибка загрузки тайтла: HTTP ${response.code}")
         }
-        return response.use { it.parseAs<TitleContentDto>() }
     }
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
-        val segments = url.pathSegments.filter { it.isNotBlank() }
-        // Accepts current (/titles/{dir}, /manga/{dir}) and legacy (/api/titles/{id-or-dir}/) paths.
-        if ("titles" !in segments && "manga" !in segments) return null
-        val dir = segments.lastOrNull() ?: return null
+        if (url.host != baseUrl.toHttpUrl().host && url.host != "www.remanga.org" && url.host != API_URL.toHttpUrl().host) return null
+        val key = url.titleDir() ?: return null
+        val id = url.legacyId(key)
+        val dir = if (id == null) key else knownDir(id) ?: return null
         val manga = SManga.create().apply { this.url = dir }
         val title = fetchTitle(dir)
-        if (!title.hasData) return null
+        if (!title.hasData || (id != null && title.id != id)) return null
         return title.toSManga(manga, baseUrl)
     }
 
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl/manga/${manga.url}"
+    override fun getMangaUrl(manga: SManga): String {
+        val storedUrl = manga.storedUrl()
+        val key = storedUrl.titleDir(storedKey = true)
+        val id = key?.let { storedUrl.legacyId(it) }
+        val dir = if (id == null) key else knownDir(id)
+        val url = baseUrl.toHttpUrl().newBuilder()
+        if (dir == null) return url.addPathSegment("search").addQueryParameter("query", manga.title).build().toString()
+        return url.addPathSegment("manga").addPathSegment(dir).addPathSegment("main").build().toString()
+    }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         Diagnostics.ctxChapter = chapter.name
@@ -617,16 +663,18 @@ abstract class ReManga :
     }
 
     private suspend fun fetchSearchList(page: Int, query: String): MangasPage {
-        val dto = client.get(
-            "$API_URL/v2/search/".toHttpUrl().newBuilder()
-                .addQueryParameter("query", query)
-                .addQueryParameter("page", page.toString())
-                .addQueryParameter("count", PAGE_SIZE.toString())
-                .build(),
-        ).parseAs<SearchDto>()
+        val dto = searchTitles(page, query)
         val mangas = dto.results.mapNotNull { it.toSManga(baseUrl) }
         return MangasPage(mangas, dto.hasNextPage())
     }
+
+    private suspend fun searchTitles(page: Int, query: String): SearchDto = client.get(
+        "$API_URL/v2/search/".toHttpUrl().newBuilder()
+            .addQueryParameter("query", query)
+            .addQueryParameter("page", page.toString())
+            .addQueryParameter("count", PAGE_SIZE.toString())
+            .build(),
+    ).parseAs<SearchDto>()
 
     private suspend fun fetchChapters(title: TitleContentDto, dir: String): List<SChapter> {
         val exDomain = if (useExManga && title.id != 0L) exMangaDomain else null
