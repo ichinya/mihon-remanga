@@ -1,9 +1,12 @@
 # mihon-remanga
 
+[![Последний релиз](https://img.shields.io/github/v/release/ichinya/mihon-remanga?label=%D0%A0%D0%B5%D0%BB%D0%B8%D0%B7&color=3567a8)](https://github.com/ichinya/mihon-remanga/releases/latest)
+[![Донат через Donate.Stream](https://img.shields.io/badge/%D0%94%D0%BE%D0%BD%D0%B0%D1%82-Donate.Stream-c74445)](https://donate.stream/ichi)
+
 Расширение-источник [Remanga](https://remanga.org) для Mihon и Tachiyomi-форков.
 Сборка и публикация полностью автоматические (GitHub Actions).
 
-[Поддержать разработку расширения](https://donate.stream/ichi)
+[![Поддержать разработку расширения — отправить донат](.github/assets/donate.webp)](https://donate.stream/ichi)
 
 ## Установка
 
