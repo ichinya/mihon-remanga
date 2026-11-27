@@ -18,6 +18,8 @@ COUNTER = "https://logging.tw1.ru/api.php?action=public"
 LOCAL_TZ = timezone(timedelta(hours=5))
 DAY = timedelta(days=1)
 FIRST_ACTIVE_ESTIMATE = 3  # 2026-11-12, first day in the device history.
+MEASURED = "замер"
+CARRY_BOTH = "перенос обоих значений"
 
 
 class DeviceCounts(NamedTuple):
@@ -48,7 +50,20 @@ def fetch_counts():
     return DeviceCounts(total, active)
 
 
-def chart_points(history):
+def read_history(path):
+    history = {}
+    with path.open(encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            # The original three-column CSV only stored observations.
+            source = row.get("active24h_source", MEASURED)
+            if source == CARRY_BOTH:
+                continue
+            active = int(row["active24h"]) if source == MEASURED and row.get("active24h") else None
+            history[date.fromisoformat(row["date"])] = DeviceCounts(int(row["total"]), active)
+    return history
+
+
+def daily_rows(history):
     first, last = min(history), max(history)
     total = history[first].total
     active = FIRST_ACTIVE_ESTIMATE
@@ -56,19 +71,27 @@ def chart_points(history):
     day = first
     while day <= last:
         counts = history.get(day)
-        if counts is not None:
+        if counts is None:
+            source = CARRY_BOTH
+        else:
             if counts.active24h is not None:
                 active = counts.active24h
                 have_active_measurement = True
-            elif not have_active_measurement and day > first:
+                source = MEASURED
+            elif have_active_measurement:
+                source = "перенос активности"
+            elif day == first:
+                source = "начальная оценка"
+            else:
                 active = counts.total - total
+                source = "суточный прирост"
             total = counts.total
-        yield day, total, active
+        yield day, total, active, source
         day += DAY
 
 
-def render(history, destination):
-    dates, totals, active = zip(*chart_points(history))
+def render(rows, destination):
+    dates, totals, active, _ = zip(*rows)
     first, last = dates[0], dates[-1]
     span = (last - first).days
     ink, muted, grid = "#302431", "#615568", "#ded9db"
@@ -99,25 +122,23 @@ def render(history, destination):
         destination.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
+def write_stats(history):
+    rows = list(daily_rows(history))
+    render(rows, STATS / "devices.svg")
+    with (STATS / "devices.csv").open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f, lineterminator="\n")
+        writer.writerow(("date", "total", "active24h", "active24h_source"))
+        writer.writerows(rows)
+
+
 def main():
-    path = STATS / "devices.csv"
-    with path.open(encoding="utf-8", newline="") as f:
-        history = {
-            date.fromisoformat(row["date"]): DeviceCounts(
-                int(row["total"]), int(row["active24h"]) if row.get("active24h") else None
-            )
-            for row in csv.DictReader(f)
-        }
+    history = read_history(STATS / "devices.csv")
     counts = fetch_counts()
     today = datetime.now(LOCAL_TZ).date()
     if today < max(history) or counts.total < history[max(history)].total:
         raise ValueError("Snapshot predates the history or the cumulative count decreased")
     history[today] = counts
-    render(history, STATS / "devices.svg")
-    with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f, lineterminator="\n")
-        writer.writerow(("date", "total", "active24h"))
-        writer.writerows((day, *history[day]) for day in sorted(history))
+    write_stats(history)
     print(f"{today}: всего {counts.total}, активны за 24 часа {counts.active24h}")
 
 
