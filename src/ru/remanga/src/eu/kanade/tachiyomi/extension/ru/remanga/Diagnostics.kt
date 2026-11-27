@@ -43,7 +43,7 @@ import javax.net.ssl.X509TrustManager
 /**
  * Structured diagnostics log: JSONL files, one per day (`logs/2026-11-03.jsonl`,
  * one entry object per line). Entry fields: id, ts, level (INFO|ERROR), source
- * (remanga|exmanga|…), manga, chapter, msg.
+ * (remanga|exmanga|…), manga, chapter, ver, msg.
  * Export converts entries to readable txt; upload ships raw day files to the log server,
  * which deduplicates entries by id — files are deleted locally after a successful upload.
  */
@@ -111,6 +111,9 @@ internal object Diagnostics {
     }
 
     private fun write(level: String, msg: String, source: String?, manga: String?, chapter: String?) {
+        val version = selfVersion()
+        // The deployed log viewer only displays msg. Keep the version visible in older viewers too.
+        val versionLine = "\nВерсия при ошибке: $version"
         val entry = buildJsonObject {
             put("id", UUID.randomUUID().toString())
             put("ts", System.currentTimeMillis())
@@ -118,7 +121,8 @@ internal object Diagnostics {
             put("source", (source ?: ctxSource ?: "").take(20))
             put("manga", (manga ?: ctxManga ?: "").take(150))
             put("chapter", (chapter ?: ctxChapter ?: "").take(150))
-            put("msg", msg.take(MAX_MSG_LEN))
+            put("ver", version)
+            put("msg", msg.take(MAX_MSG_LEN - versionLine.length) + versionLine)
         }
         synchronized(lock) {
             runCatching { appendEntry(entry) }
@@ -205,7 +209,7 @@ internal object Diagnostics {
                 if (msg.isNotEmpty()) append(": ").append(msg)
             }
         }
-        return selfVersion() + "\n" + text.takeLast(EXPORT_MAX_CHARS)
+        return text.takeLast(EXPORT_MAX_CHARS)
     }
 
     fun clear() {
@@ -377,36 +381,41 @@ internal enum class ExChapterAuthRequest { INITIAL, RECOVERY }
 
 /**
  * Outermost source interceptor: records the outcome the user actually sees, after the
- * image-CDN fallback has retried. Never alters requests, responses or errors.
+ * image-CDN fallback has retried, including failures while reading a successful response.
  */
 internal object DiagnosticsInterceptor : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val authRequest = request.tag(ExChapterAuthRequest::class.java)
-        // The chapter loader reports the whole recovery attempt once it knows the outcome.
-        if (authRequest == ExChapterAuthRequest.RECOVERY) return chain.proceed(request)
+        val recovery = authRequest == ExChapterAuthRequest.RECOVERY
+        val trace = request.tag(RequestTrace::class.java) ?: RequestTrace()
+        trace.call = chain.call()
         val response = try {
-            chain.proceed(request)
+            chain.proceed(request.newBuilder().tag(RequestTrace::class.java, trace).build())
         } catch (e: IOException) {
-            // Canceled loads are normal (Coil cancels cover requests when scrolling) — not failures.
-            if (!chain.call().isCanceled() && e.message != "Canceled") {
-                Diagnostics.failure(request, error = e)
-            }
+            if (!recovery && !trace.isCanceled(e)) Diagnostics.failure(request, error = e, note = trace.describe(e))
             throw e
         }
 
         if (response.code == 401 && (authRequest == ExChapterAuthRequest.INITIAL || isExHistory(request))) return response
         when {
-            response.code >= 400 ->
-                Diagnostics.failure(request, note = "HTTP ${response.code}")
+            response.code >= 400 -> if (!recovery) Diagnostics.failure(request, note = "HTTP ${response.code}")
             request.url.host.contains("remanga") &&
-                response.headers["Content-Type"].orEmpty().contains("text/html") ->
+                !recovery && response.headers["Content-Type"].orEmpty().contains("text/html") ->
                 Diagnostics.failure(
                     request,
                     note = "HTTP ${response.code} · получен HTML вместо API/изображения" +
                         " (DDoS-Guard: гео-блок или перехват)",
                 )
+            response.isSuccessful -> return trace.watchBody(response) { error ->
+                if (!recovery) {
+                    Diagnostics.failure(response.request, error, trace.describe(error))
+                } else if (request.method == "GET") {
+                    // Login-body failures are reported by the caller. A retried chapter is read later.
+                    Diagnostics.error("Повтор GET /chapter: ${error.javaClass.simpleName}. ${trace.describe(error)}", source = "exmanga")
+                }
+            }
         }
         return response
     }

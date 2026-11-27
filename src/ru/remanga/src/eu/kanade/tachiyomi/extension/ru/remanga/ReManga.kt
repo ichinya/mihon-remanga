@@ -79,7 +79,7 @@ abstract class ReManga :
     private sealed interface ExLogin {
         data object Cached : ExLogin
         data object Authenticated : ExLogin
-        class Failed(val reason: String) : ExLogin
+        class Failed(val reason: String, val readerMessage: String = reason) : ExLogin
     }
 
     /**
@@ -96,31 +96,39 @@ abstract class ReManga :
         val password = preferences.getString(EX_PASSWORD_PREF, null).orEmpty()
         if (email.isEmpty() || password.isEmpty()) {
             val missing = listOfNotNull("email".takeIf { email.isEmpty() }, "пароль".takeIf { password.isEmpty() })
-            return ExLogin.Failed("Вход пропущен: заполните ${missing.joinToString(" и ")} в настройках источника.")
+            val message = "Для входа в ExManga заполните ${missing.joinToString(" и ")} в настройках источника."
+            return ExLogin.Failed(message)
         }
+        val trace = RequestTrace()
         return try {
             val request = Request.Builder().url("$exMangaDomain/auth/login").headers(exHeaders())
                 .post(ExLoginDto(email, password).toJsonRequestBody())
                 .tag(ExChapterAuthRequest::class.java, authRequest)
+                .tag(RequestTrace::class.java, trace)
                 .build()
             client.newCall(request).await().use { resp ->
-                val status = "POST /auth/login → ${resp.authStatus()}"
-                if (!resp.isSuccessful) return ExLogin.Failed(status)
+                val failureCode = resp.authFailureCode()
+                val status = "POST /auth/login → ${resp.authStatus(failureCode)}"
+                if (!resp.isSuccessful) {
+                    val message = loginRejection(failureCode, "Не удалось войти в ExManga (HTTP ${resp.code}).")
+                    return ExLogin.Failed(status, message)
+                }
                 val body = try {
                     resp.parseAs<ExAuthResponseDto>()
                 } catch (_: SerializationException) {
-                    return ExLogin.Failed("$status, ответ не соответствует формату входа.")
+                    return ExLogin.Failed("$status, ответ не соответствует формату входа.", "Не удалось прочитать ответ ExManga на запрос входа.")
                 }
                 if (body.success == false) {
                     val reason = authErrorCode(body.data) ?: "success=false"
-                    return ExLogin.Failed("$status, сервер отклонил вход ($reason).")
+                    val message = loginRejection(reason, "ExManga отклонила запрос входа.")
+                    return ExLogin.Failed("$status, сервер отклонил вход ($reason).", message)
                 }
                 val value = when (val data = body.data) {
                     is JsonObject -> data["token"] ?: data["accessToken"] ?: data["access_token"] ?: data["jwt"]
                     else -> data
                 }
                 val token = (value as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
-                if (token.isNullOrBlank()) return ExLogin.Failed("$status, в ответе нет токена.")
+                if (token.isNullOrBlank()) return ExLogin.Failed("$status, в ответе нет токена.", "В ответе ExManga нет токена для входа.")
                 preferences.edit().putString(EX_TOKEN_PREF, token).apply()
                 ExLogin.Authenticated
             }
@@ -128,11 +136,17 @@ abstract class ReManga :
             throw e
         } catch (e: IOException) {
             currentCoroutineContext().ensureActive()
-            if (e.message == "Canceled") throw e
-            ExLogin.Failed("POST /auth/login: ${e.javaClass.simpleName}.")
+            if (trace.isCanceled(e)) throw e
+            ExLogin.Failed("POST /auth/login: ${e.javaClass.simpleName}. ${trace.describe(e)}", "Не удалось завершить вход в ExManga из-за ошибки сети.")
         } catch (_: IllegalArgumentException) {
             ExLogin.Failed("Не удалось сформировать запрос входа в ExManga.")
         }
+    }
+
+    private fun loginRejection(reason: String?, fallback: String): String = if (reason == "invalid_credentials") {
+        "ExManga отклонила данные для входа. Проверьте email и пароль в настройках источника."
+    } else {
+        fallback
     }
 
     /** Extracts the human-readable reason from an ExManga error body ("data" field), if present. */
@@ -158,6 +172,7 @@ abstract class ReManga :
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(3, 1.seconds)
         .addGlobalSignR46TrustAnchor()
         .addInterceptor(DiagnosticsInterceptor)
+        .addNetworkInterceptor(RequestTrace.networkInterceptor)
         .addInterceptor(ImageCdnFallbackInterceptor)
         .addInterceptor(HostBackoffInterceptor())
         .also {
@@ -417,7 +432,7 @@ abstract class ReManga :
             val code = response.code
             response.close()
             if (code == 404) {
-                throw Exception("Тайтл удалён с remanga — уберите его из библиотеки или обновите через поиск")
+                throw Exception("ReManga не нашла тайтл по сохранённому адресу. Поищите его по названию. Если найдёте новую карточку, перенесите прогресс через миграцию в Mihon.")
             }
             throw Exception("Ошибка загрузки тайтла: HTTP $code")
         }
@@ -515,9 +530,10 @@ abstract class ReManga :
 
     private suspend fun requestExChapter(url: HttpUrl, chapter: String): Response {
         val manga = Diagnostics.ctxManga.orEmpty()
-        fun request(step: ExChapterAuthRequest) = Request.Builder().url(url).headers(exHeaders())
+        fun request(step: ExChapterAuthRequest, trace: RequestTrace? = null) = Request.Builder().url(url).headers(exHeaders())
             .cacheControl(DEFAULT_CACHE_CONTROL)
             .tag(ExChapterAuthRequest::class.java, step)
+            .tag(RequestTrace::class.java, trace)
             .build()
 
         val first = client.newCall(request(ExChapterAuthRequest.INITIAL)).await()
@@ -528,24 +544,24 @@ abstract class ReManga :
         fun report(reason: String) {
             Diagnostics.error("GET /chapter $tokenState → $firstStatus. $reason", "exmanga", manga, chapter)
         }
-        val accountRequired = "Глава доступна только с аккаунтом ExManga — укажите email/пароль в настройках источника ⚙️"
         val refresh = rejectedAuth != null && rejectedAuth == exHeaders()["Authorization"]
         val loginStep = when (val login = ensureExToken(refresh, ExChapterAuthRequest.RECOVERY)) {
             ExLogin.Cached -> "Использован сохранённый токен."
             ExLogin.Authenticated -> "Вход выполнен, получен токен."
             is ExLogin.Failed -> {
                 report(login.reason)
-                throw Exception(accountRequired)
+                throw Exception(login.readerMessage)
             }
         }
 
-        val retry = request(ExChapterAuthRequest.RECOVERY)
+        val trace = RequestTrace()
+        val retry = request(ExChapterAuthRequest.RECOVERY, trace)
         val retryStep = "$loginStep Повтор GET /chapter"
         val response = try {
             client.newCall(retry).await()
         } catch (e: IOException) {
             currentCoroutineContext().ensureActive()
-            if (e.message != "Canceled") report("$retryStep: ${e.javaClass.simpleName}.")
+            if (!trace.isCanceled(e)) report("$retryStep: ${e.javaClass.simpleName}. ${trace.describe(e)}")
             throw e
         }
         if (!response.isSuccessful) {
@@ -554,20 +570,21 @@ abstract class ReManga :
         }
         if (response.code == 401) {
             response.close()
-            throw Exception(accountRequired)
+            throw Exception("$loginStep ExManga отказала в доступе к главе (HTTP 401).")
         }
         return response
     }
 
-    private fun Response.authStatus(): String {
-        if (isSuccessful) return "HTTP $code"
+    private fun Response.authStatus(reason: String? = authFailureCode()): String = if (reason == null) "HTTP $code" else "HTTP $code ($reason)"
+
+    private fun Response.authFailureCode(): String? {
+        if (isSuccessful) return null
         val bearer = challenges().firstOrNull { it.scheme.equals("Bearer", ignoreCase = true) }?.authParams?.get("error")
-        val reason = authErrorCode(bearer?.let(::JsonPrimitive)) ?: if (body.contentType()?.subtype?.endsWith("json") == true) {
+        return authErrorCode(bearer?.let(::JsonPrimitive)) ?: if (body.contentType()?.subtype?.endsWith("json") == true) {
             runCatching { peekBody(4096).use { authErrorCode(it.string().parseAs<JsonObject>()) } }.getOrNull()
         } else {
             null
         }
-        return if (reason == null) "HTTP $code" else "HTTP $code ($reason)"
     }
 
     // A server message can echo the reader's credentials. Only emit known categories.
