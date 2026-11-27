@@ -18,8 +18,6 @@ COUNTER = "https://logging.tw1.ru/api.php?action=public"
 LOCAL_TZ = timezone(timedelta(hours=5))
 DAY = timedelta(days=1)
 FIRST_ACTIVE_ESTIMATE = 3  # 2026-11-12, first day in the device history.
-MEASURED = "замер"
-CARRY_BOTH = "перенос обоих значений"
 
 
 class DeviceCounts(NamedTuple):
@@ -54,11 +52,7 @@ def read_history(path):
     history = {}
     with path.open(encoding="utf-8", newline="") as f:
         for row in csv.DictReader(f):
-            # The original three-column CSV only stored observations.
-            source = row.get("active24h_source", MEASURED)
-            if source == CARRY_BOTH:
-                continue
-            active = int(row["active24h"]) if source == MEASURED and row.get("active24h") else None
+            active = int(row["active24h"]) if row.get("active24h") else None
             history[date.fromisoformat(row["date"])] = DeviceCounts(int(row["total"]), active)
     return history
 
@@ -67,31 +61,23 @@ def daily_rows(history):
     first, last = min(history), max(history)
     total = history[first].total
     active = FIRST_ACTIVE_ESTIMATE
-    have_active_measurement = False
+    have_recorded_activity = False
     day = first
     while day <= last:
         counts = history.get(day)
-        if counts is None:
-            source = CARRY_BOTH
-        else:
+        if counts is not None:
             if counts.active24h is not None:
                 active = counts.active24h
-                have_active_measurement = True
-                source = MEASURED
-            elif have_active_measurement:
-                source = "перенос активности"
-            elif day == first:
-                source = "начальная оценка"
-            else:
+                have_recorded_activity = True
+            elif not have_recorded_activity and day > first:
                 active = counts.total - total
-                source = "суточный прирост"
             total = counts.total
-        yield day, total, active, source
+        yield day, total, active
         day += DAY
 
 
 def render(rows, destination):
-    dates, totals, active, _ = zip(*rows)
+    dates, totals, active = zip(*rows)
     first, last = dates[0], dates[-1]
     span = (last - first).days
     ink, muted, grid = "#302431", "#615568", "#ded9db"
@@ -127,7 +113,7 @@ def write_stats(history):
     render(rows, STATS / "devices.svg")
     with (STATS / "devices.csv").open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, lineterminator="\n")
-        writer.writerow(("date", "total", "active24h", "active24h_source"))
+        writer.writerow(("date", "total", "active24h"))
         writer.writerows(rows)
 
 
