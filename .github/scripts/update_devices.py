@@ -17,6 +17,7 @@ STATS = Path(__file__).resolve().parents[2] / "stats"
 COUNTER = "https://logging.tw1.ru/api.php?action=public"
 LOCAL_TZ = timezone(timedelta(hours=5))
 DAY = timedelta(days=1)
+FIRST_ACTIVE_ESTIMATE = 3  # 2026-11-12, first day in the device history.
 
 
 class DeviceCounts(NamedTuple):
@@ -47,29 +48,41 @@ def fetch_counts():
     return DeviceCounts(total, active)
 
 
-def render(history, destination):
+def chart_points(history):
     first, last = min(history), max(history)
+    total = history[first].total
+    active = FIRST_ACTIVE_ESTIMATE
+    have_active_measurement = False
+    day = first
+    while day <= last:
+        counts = history.get(day)
+        if counts is not None:
+            if counts.active24h is not None:
+                active = counts.active24h
+                have_active_measurement = True
+            elif not have_active_measurement and day > first:
+                active = counts.total - total
+            total = counts.total
+        yield day, total, active
+        day += DAY
+
+
+def render(history, destination):
+    dates, totals, active = zip(*chart_points(history))
+    first, last = dates[0], dates[-1]
     span = (last - first).days
-    dates = [first + i * DAY for i in range(span + 1)]
-    # Leave a gap if a scheduled observation is missing.
-    totals = [history[day].total if day in history else None for day in dates]
-    active = [history[day].active24h if day in history else None for day in dates]
-    latest = history[last]
     ink, muted, grid = "#302431", "#615568", "#ded9db"
     fig = Figure(figsize=(9, 3.6), facecolor="#fffaf4")
     ax = fig.add_axes([0.08, 0.16, 0.86, 0.54], facecolor=fig.get_facecolor())
     fig.text(0.08, 0.88, "Устройства ReManga", color=ink, weight="bold", size=19)
     fig.text(0.94, 0.89, last.strftime("%d.%m.%Y"), color=muted, size=12, ha="right")
     ax.plot(dates, totals, color="#77466b", linewidth=2.3, marker=".", markersize=5,
-            label=f"Всего: {latest.total}")
-    active_label = "Активны за 24 часа"
-    if latest.active24h is not None:
-        active_label += f": {latest.active24h}"
+            label=f"Всего: {totals[-1]}")
     ax.plot(dates, active, color="#006e68", linewidth=2.1, linestyle="--", marker="o", markersize=4,
-            label=active_label)
+            label=f"Активны за 24 часа: {active[-1]}")
     ax.legend(loc="lower left", bbox_to_anchor=(0, 1.04), borderaxespad=0, ncols=2,
               frameon=False, fontsize=11, labelcolor=ink)
-    ax.set_ylim(0, max(5, max(counts.total for counts in history.values()) * 1.12))
+    ax.set_ylim(0, max(5, max(totals) * 1.12))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
     ax.grid(axis="y", color=grid, linewidth=0.8)
     ax.set_axisbelow(True)
